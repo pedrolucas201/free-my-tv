@@ -2,6 +2,7 @@ package io.freemytv;
 
 import android.app.Activity;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapShader;
@@ -15,6 +16,7 @@ import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.media.tv.TvInputManager;
+import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -99,6 +101,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final int Z_TOP = 4, Z_CARDS = 5;
 
     private final Activity activity;
+    private volatile boolean stremio;   // Stremio installed: a held OK on a pick opens it there
     private final Scene scene = new Scene();
     private final HomeData data;
     private final Recs recs;
@@ -131,8 +134,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     // At the top: tabs (0 to 2) and icon-only buttons (3 to 5); the three cards
     private int tab, topIndex, cardIndex;
     private List<Recs.Pick> cards = new ArrayList<>();
-    private final Spring[] topFocus = new Spring[6];
-    private final RectF[] topRects = new RectF[6];
+    private final Spring[] topFocus = new Spring[7];   // 3 tabs + up to 4 buttons
+    private final RectF[] topRects = new RectF[7];
     private final Spring[] cardFocus = new Spring[3];
     private final RectF[] cardRects = new RectF[3];
     private final List<HomeApps.Item> lightButtons = new ArrayList<>();
@@ -350,7 +353,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         setContentDescription("Free My TV");
         drawerLayer.setVisibility(INVISIBLE);
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < topRects.length; i++) {
             topFocus[i] = new Spring(0.26f, 0.85f, 0);
             topRects[i] = new RectF();
         }
@@ -437,12 +440,44 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         motionDirty = true;
     }
 
-    /** The three corner buttons, with their names in the current language. */
+    /** The four corner buttons, with their names in the current language. */
     private void makeLightButtons() {
         lightButtons.clear();
         lightButtons.add(HomeApps.action(HomeApps.LIVE_TV, "live", Ui.tr("TV aberta", "Live TV"), "live_tv"));
         lightButtons.add(HomeApps.action(HomeApps.INPUTS, "inputs", Ui.tr("Entradas HDMI", "HDMI Inputs"), "hdmi"));
+        lightButtons.add(HomeApps.action(HomeApps.SLEEP, "sleep", sleepLabel(), "bedtime"));
         lightButtons.add(HomeApps.action(HomeApps.SETTINGS, "settings", Ui.tr("Configurações", "Settings"), "settings"));
+    }
+
+    private String sleepLabel() {
+        int left = SleepTimer.minutesLeft(getContext());
+        return left > 0 ? Ui.tr("Desliga em " + left + " min", "Off in " + left + " min", "Se apaga en " + left + " min")
+                : Ui.tr("Desligar depois", "Sleep timer", "Apagar después");
+    }
+
+    /** The moon button: the next step of the sleep timer, said in a toast and under the button. */
+    private void sleepTimer() {
+        int minutes = SleepTimer.cycle(getContext());
+        for (HomeApps.Item b : lightButtons) if (b.kind == HomeApps.SLEEP) b.label = sleepLabel();
+        statusDirty = true;
+        showToast(minutes > 0 ? Ui.tr("A TV desliga em " + minutes + " min.", "The TV turns off in " + minutes + " min.",
+                "La TV se apaga en " + minutes + " min.") : Ui.tr("Timer desligado.", "Sleep timer off.", "Temporizador apagado."));
+    }
+
+    /** Held OK on a pick: its page in Stremio, where every add-on lists its streams. False when that can't be done. */
+    private boolean openInStremio() {
+        Recs.Pick p = zone == Z_HERO ? currentPick() : zone == Z_CARDS && cardIndex < cards.size() ? cards.get(cardIndex) : null;
+        if (p == null || p.imdb == null || !stremio) return false;
+        Intent open = new Intent(Intent.ACTION_VIEW,
+                Uri.parse("stremio:///detail/" + (p.kind.equals("tv") ? "series" : "movie") + "/" + p.imdb));
+        open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            activity.startActivity(open);
+            click.open();
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     private static String[] tabs() {
@@ -712,6 +747,14 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     /** This hour's picks: the cards and the background image (called when Recs notifies and every 15 s). */
     private void updatePicks() {
         if (labelPaint == null) return;
+        for (HomeApps.Item b : lightButtons) {
+            if (b.kind != HomeApps.SLEEP) continue;
+            String label = sleepLabel();   // the minutes left
+            if (!label.equals(b.label)) {
+                b.label = label;
+                statusDirty = true;
+            }
+        }
         updateCards();
     }
 
@@ -1861,6 +1904,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             final List<HomeApps.Item> st = statusList(c);
             final List<HomeApps.Item> d = drawerList(c);
             final List<HomeApps.Item> o = HomeApps.others(c);
+            stremio = HomeApps.launchIntent(c.getPackageManager(), "com.stremio.one") != null;
             handler.post(() -> {
                 setShelf(s);
                 setStatusItems(st);
@@ -1895,6 +1939,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 // app opens nothing.
                 if (down) {
                     if (e.getRepeatCount() == 0) okDown = true;
+                    else if (e.getRepeatCount() == 1 && okDown && openInStremio()) okDown = false;   // held: Stremio
                 } else {
                     if (okDown && !e.isCanceled() && spoken.keyClick()) activate();
                     okDown = false;
@@ -2069,6 +2114,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             r = tileRects[shelfIndex];
         }
         click.open();
+        if (it.kind == HomeApps.SLEEP) {
+            sleepTimer();
+            return;
+        }
         if (it.kind == HomeApps.ALL_APPS) {
             openSheet();
             return;
@@ -2257,7 +2306,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             x = topRects[i].right + 4 * k;
         }
         float b = L_BUTTON * k, right = CONTENT_R * k, cy = L_BUTTON_CY * k;
-        for (int i = 2; i >= 0; i--) {
+        for (int i = lightButtons.size() - 1; i >= 0; i--) {
             topRects[3 + i].set(right - b, cy - b / 2, right, cy + b / 2);
             right -= b + L_BUTTON_GAP * k;
         }
@@ -2441,7 +2490,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
      */
     private void drawLightButtons(Canvas c) {
         applyTone();
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < lightButtons.size(); i++) {
             RectF r = topRects[3 + i];
             float f = Ui.clamp(topFocus[3 + i].value), s = 1 + 0.1f * f, rad = r.width() / 2 * s;
             cell.set(r.centerX() - rad, r.centerY() - rad, r.centerX() + rad, r.centerY() + rad);
@@ -2495,7 +2544,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 break;
             case Z_TOP:
                 if (dx != 0) {
-                    int next = Math.max(0, Math.min(5, topIndex + dx));
+                    int next = Math.max(0, Math.min(2 + lightButtons.size(), topIndex + dx));
                     if (next == topIndex) return true;
                     topIndex = next;
                     if (topIndex < 3) selectTab(topIndex);   // like Apple TV tabs: focusing a tab selects it
