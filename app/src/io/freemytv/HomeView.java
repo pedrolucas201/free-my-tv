@@ -96,7 +96,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static final String[] TABS = {"Explorar", "Filmes", "Séries"};
     private static final String[] TABS_EN = {"Explore", "Movies", "Shows"};
     private static final String[] TABS_ES = {"Explorar", "Películas", "Series"};
-    private static final String[] TAB_KIND = {null, "movie", "tv"};
+    private static final String[] TAB_KIND = {null, "movie", "tv", "stremio"};
     private static final int Z_TOP = 4, Z_CARDS = 5;
 
     private final Activity activity;
@@ -133,8 +133,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     // At the top: tabs (0 to 2) and icon-only buttons (3 to 5); the scrolling row.
     private int tab, topIndex, cardIndex;
     private List<Recs.Pick> cards = new ArrayList<>();
-    private final Spring[] topFocus = new Spring[7];   // 3 tabs + up to 4 buttons
-    private final RectF[] topRects = new RectF[7];
+    private final Spring[] topFocus = new Spring[8];   // up to 4 tabs + up to 4 buttons
+    private final RectF[] topRects = new RectF[8];
     private Spring[] cardFocus = new Spring[0];
     private RectF[] cardRects = new RectF[0];
     private String[] cardTitles = new String[0], cardMetas = new String[0];
@@ -468,9 +468,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     /** Held OK on a pick: its page in Stremio, where every add-on lists its streams. False when that can't be done. */
     private boolean openInStremio() {
         Recs.Pick p = zone == Z_HERO ? currentPick() : zone == Z_CARDS && cardIndex < cards.size() ? cards.get(cardIndex) : null;
-        if (p == null || p.imdb == null || !stremio) return false;
-        Intent open = new Intent(Intent.ACTION_VIEW,
-                Uri.parse("stremio:///detail/" + (p.kind.equals("tv") ? "series" : "movie") + "/" + p.imdb));
+        if (p == null || (p.imdb == null && p.resume == null) || !stremio) return false;
+        Intent open = new Intent(Intent.ACTION_VIEW, Uri.parse("stremio:///detail/" + (p.kind.equals("tv") ? "series" : "movie")
+                + "/" + (p.resume != null ? p.resume : p.imdb)));
         open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         try {
             activity.startActivity(open);
@@ -482,7 +482,15 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     private static String[] tabs() {
-        return Ui.es ? TABS_ES : Ui.en ? TABS_EN : TABS;
+        String[] t = Ui.es ? TABS_ES : Ui.en ? TABS_EN : TABS;
+        if (!Recs.hasStremio()) return t;
+        // "Continue": what was left halfway in Stremio (the person's own Stremio key in config.properties).
+        return new String[] {t[0], t[1], t[2], Ui.tr("Continuar", "Continue", "Continuar")};
+    }
+
+    /** Tabs come first in the top row; the round buttons follow from this index. */
+    private static int nTabs() {
+        return Recs.hasStremio() ? 4 : 3;
     }
 
     @Override public void onData() {
@@ -1193,7 +1201,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         Paint text = lQuote;
         // The corner buttons' names appear in this row: the quotes fade out while one of them has focus.
         float fade = 1;
-        for (int i = 3; i < 6; i++) fade = Math.min(fade, 1 - Ui.clamp(topFocus[i].value));
+        for (int i = nTabs(); i < nTabs() + lightButtons.size(); i++) fade = Math.min(fade, 1 - Ui.clamp(topFocus[i].value));
         if (fade <= 0.01f) return;
         int textColor = text.getColor();
         text.setColor(Ui.alpha(textColor, fade));
@@ -2107,14 +2115,18 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             it = drawerItems.get(drawerIndex);
             r = drawerRects[drawerIndex];
         } else if (zone == Z_TOP) {
-            if (topIndex < 3) {
+            if (topIndex < nTabs()) {
                 selectTab(topIndex);
                 return;
             }
-            it = lightButtons.get(topIndex - 3);
+            it = lightButtons.get(topIndex - nTabs());
             r = topRects[topIndex];
         } else if (zone == Z_CARDS) {
             Recs.Pick p = cardIndex < cards.size() ? cards.get(cardIndex) : null;
+            if (p != null && p.resume != null) {
+                if (openInStremio()) return;
+                p = null;
+            }
             if (p == null || p.pkg == null) return;
             it = HomeApps.app(p.pkg, Recs.serviceName(p));
             r = cardRects[cardIndex];
@@ -2166,7 +2178,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             for (int i = 0; i < others.size(); i++) out.add(a11yId(GRID, i));
             return;
         }
-        for (int i = 0; i < 3 + lightButtons.size(); i++) out.add(a11yId(Z_TOP, i));
+        for (int i = 0; i < nTabs() + lightButtons.size(); i++) out.add(a11yId(Z_TOP, i));
         for (int i = 0; i < cards.size(); i++) out.add(a11yId(Z_CARDS, i));
         for (int i = 0; i < shelf.size(); i++) out.add(a11yId(Z_SHELF, i));
         for (int i = 0; i < drawerItems.size(); i++) out.add(a11yId(Z_DRAWER, i));
@@ -2179,8 +2191,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 if (i >= others.size()) return "";
                 return label(others, i) + ", " + (i + 1) + Ui.tr(" de ", " of ") + others.size();
             case Z_TOP:
-                if (i >= 3) return label(lightButtons, i - 3);
-                return tabs()[i] + Ui.tr(", aba ", ", tab ") + (i + 1) + Ui.tr(" de 3", " of 3");
+                if (i >= nTabs()) return label(lightButtons, i - nTabs());
+                return tabs()[i] + Ui.tr(", aba ", ", tab ") + (i + 1) + Ui.tr(" de ", " of ") + nTabs();
             case Z_CARDS: return i < cards.size() ? pickText(cards.get(i)) + ", " + (i + 1)
                     + Ui.tr(" de ", " of ", " de ") + cards.size() : "";
             case Z_SHELF: return label(shelf, i);
@@ -2207,9 +2219,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 break;
             }
             case Z_TOP:
-                if (i >= 3 + lightButtons.size()) return false;
+                if (i >= nTabs() + lightButtons.size()) return false;
                 a11yRect.set(topRects[i]);
-                dy = (i < 3 ? heroLayer : status).getTranslationY();
+                dy = (i < nTabs() ? heroLayer : status).getTranslationY();
                 break;
             case Z_CARDS:
                 if (i >= cards.size()) return false;
@@ -2270,10 +2282,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 drawerIndex = i;
                 break;
             case Z_TOP:
-                if (i >= 3 + lightButtons.size()) return;
+                if (i >= nTabs() + lightButtons.size()) return;
                 if (drawerOpen) closeDrawer();
                 topIndex = i;
-                if (i < 3) selectTab(i);
+                if (i < nTabs()) selectTab(i);
                 break;
             case Z_CARDS:
                 if (i >= cards.size()) return;
@@ -2315,14 +2327,14 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         // Text tabs; the focus pill extends 26 px past the text (the first tab's text starts at the margin).
         float pad = 26 * k, tabTop = L_TABBAR_TOP * k, tabBottom = (L_TABBAR_TOP + L_TABBAR_H) * k;
         float x = MARGIN * k - pad;
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < nTabs(); i++) {
             float tw = Math.max(lTabOn.measureText(tabs()[i]), lTab.measureText(tabs()[i]));
             topRects[i].set(x, tabTop, x + tw + 2 * pad, tabBottom);
             x = topRects[i].right + 4 * k;
         }
         float b = L_BUTTON * k, right = CONTENT_R * k, cy = L_BUTTON_CY * k;
         for (int i = lightButtons.size() - 1; i >= 0; i--) {
-            topRects[3 + i].set(right - b, cy - b / 2, right, cy + b / 2);
+            topRects[nTabs() + i].set(right - b, cy - b / 2, right, cy + b / 2);
             right -= b + L_BUTTON_GAP * k;
         }
         layoutCardRects();
@@ -2356,6 +2368,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (recs.loadingMore()) cardProgress = Ui.tr("Carregando mais…", "Loading more…", "Cargando más…");
         else if (!recs.moreError().isEmpty()) cardProgress = Ui.tr("Sem conexão. Tentando novamente…",
                 "Offline. Retrying…", "Sin conexión. Reintentando…");
+        else if (cards.isEmpty() && "stremio".equals(TAB_KIND[tab])) cardProgress = !recs.resumeReady()
+                ? Ui.tr("Buscando no Stremio…", "Checking Stremio…", "Buscando en Stremio…")
+                : Ui.tr("Nada pela metade no Stremio.", "Nothing halfway in Stremio.", "Nada a medias en Stremio.");
     }
 
     /** Appending recommendations preserves the focused title and scroll position. */
@@ -2444,7 +2459,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         // Text tabs (the selected one in bold, in the main text color); with focus on the tabs, the selected one gets
         // the white pill with a shadow and grows a little (the tvOS focus).
         float focus = Ui.clamp(topFocus[tab].value);
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < nTabs(); i++) {
             RectF r = topRects[i];
             if (i == tab && focus > 0.01f) {
                 float s = 1 + 0.05f * focus;
@@ -2474,6 +2489,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (zone == Z_CARDS && !cards.isEmpty() && !cardProgress.isEmpty()) {
             lTip.setAlpha(255);
             c.drawText(cardProgress, MARGIN * k, 795 * k, lTip);
+        } else if (cards.isEmpty() && !cardProgress.isEmpty()) {
+            lTip.setAlpha(255);
+            c.drawText(cardProgress, w / 2f, 470 * k, lTip);   // in the middle of the empty row
         }
         if (HomeData.coinCount() > 0) drawQuotes(c);
     }
@@ -2548,8 +2566,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private void drawLightButtons(Canvas c) {
         applyTone();
         for (int i = 0; i < lightButtons.size(); i++) {
-            RectF r = topRects[3 + i];
-            float f = Ui.clamp(topFocus[3 + i].value), s = 1 + 0.1f * f, rad = r.width() / 2 * s;
+            RectF r = topRects[nTabs() + i];
+            float f = Ui.clamp(topFocus[nTabs() + i].value), s = 1 + 0.1f * f, rad = r.width() / 2 * s;
             cell.set(r.centerX() - rad, r.centerY() - rad, r.centerX() + rad, r.centerY() + rad);
             tmp.set(cell);
             tmp.offset(0, (6 + 8 * f) * k);
@@ -2601,10 +2619,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 break;
             case Z_TOP:
                 if (dx != 0) {
-                    int next = Math.max(0, Math.min(2 + lightButtons.size(), topIndex + dx));
+                    int next = Math.max(0, Math.min(nTabs() - 1 + lightButtons.size(), topIndex + dx));
                     if (next == topIndex) return true;
                     topIndex = next;
-                    if (topIndex < 3) selectTab(topIndex);   // like Apple TV tabs: focusing a tab selects it
+                    if (topIndex < nTabs()) selectTab(topIndex);   // like Apple TV tabs: focusing a tab selects it
                 } else if (dy > 0) {
                     if (cards.isEmpty()) {
                         zone = Z_SHELF;

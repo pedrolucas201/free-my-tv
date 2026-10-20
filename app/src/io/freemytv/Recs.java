@@ -45,6 +45,7 @@ final class Recs {
         String kind;            // "movie" or "tv"
         String title, backdrop, meta = "", app, pkg;
         String imdb;            // "tt0111161": the title in Stremio
+        String resume;          // "tt0944947/tt0944947:2:5": where it stopped in Stremio (the Continue tab), or null
         boolean detailed;
     }
 
@@ -197,6 +198,7 @@ final class Recs {
 
     /** The browsable list stays in order while the user moves through it. */
     List<Pick> catalog(String kind) {
+        if ("stremio".equals(kind)) return resume();
         List<Pick> list = new ArrayList<>();
         if (!hasKey(context)) return list;    // no TMDB key: no recommendations
         Map<String, Boolean> have = new HashMap<>();   // one look per app, not per title (this runs every 15 s)
@@ -212,7 +214,7 @@ final class Recs {
 
     /** More popular titles on the TV's services, fetched before the focused card reaches the end. */
     void loadMore(String kind) {
-        if (!hasKey(context) || fetching || loadingMore) return;
+        if ("stremio".equals(kind) || !hasKey(context) || fetching || loadingMore) return;
         long since = System.currentTimeMillis() - moreFailedAt;
         if (moreFailedAt != 0 && since >= 0 && since < 30_000) return;
         if (!(kind == null ? more[0] || more[1] : more["movie".equals(kind) ? 0 : 1])) return;
@@ -263,6 +265,112 @@ final class Recs {
         return "&language=" + lang() + "&watch_region=" + REGION
                 + "&with_watch_monetization_types=flatrate&include_adult=false&sort_by=popularity.desc&with_watch_providers="
                 + URLEncoder.encode(ids.toString(), "UTF-8");
+    }
+
+    // MARK: - Continue (Stremio)
+
+    private volatile List<Pick> resume = new ArrayList<>();
+    private volatile long resumeAt;
+    private volatile boolean resuming;
+
+    /** The person's own Stremio key (config.properties "stremio_key"): the Continue tab. It never goes to the log. */
+    static boolean hasStremio() {
+        return !Config.STREMIO_KEY.trim().isEmpty();
+    }
+
+    /** The first look at Stremio is done (until then, an empty Continue tab means "still checking"). */
+    boolean resumeReady() { return resumeAt != 0; }
+
+    /** What was left halfway in Stremio, last watched first; fetched again at most once a minute. */
+    private List<Pick> resume() {
+        if (hasStremio() && !resuming && System.currentTimeMillis() - resumeAt > 60_000) {
+            resuming = true;
+            io.execute(this::fetchResume);
+        }
+        return resume;
+    }
+
+    private void fetchResume() {
+        try {
+            JSONObject body = new JSONObject().put("authKey", Config.STREMIO_KEY.trim()).put("collection", "libraryItem")
+                    .put("ids", new JSONArray()).put("all", true);
+            HttpURLConnection c = (HttpURLConnection) new URL("https://api.strem.io/api/datastoreGet").openConnection();
+            JSONObject answer;
+            try {
+                c.setConnectTimeout(8000);
+                c.setReadTimeout(15000);
+                c.setDoOutput(true);
+                c.setRequestProperty("Content-Type", "application/json");
+                try (java.io.OutputStream out = c.getOutputStream()) { out.write(body.toString().getBytes("UTF-8")); }
+                answer = new JSONObject(read(c.getInputStream()));
+            } finally {
+                c.disconnect();
+            }
+            if (answer.has("error")) throw new IOException("Stremio: " + answer.getJSONObject("error").optString("message"));
+            JSONArray items = answer.getJSONArray("result");
+            List<JSONObject> halfway = new ArrayList<>();
+            for (int i = 0; i < items.length(); i++) {
+                JSONObject o = items.getJSONObject(i), st = o.optJSONObject("state");
+                String type = o.optString("type");
+                if (st == null || !("movie".equals(type) || "series".equals(type))) continue;
+                if (o.optBoolean("removed") && !o.optBoolean("temp")) continue;
+                if (st.optLong("timeOffset") <= 0) continue;
+                halfway.add(o);
+            }
+            java.util.Collections.sort(halfway, (a, b) -> b.optJSONObject("state").optString("lastWatched")
+                    .compareTo(a.optJSONObject("state").optString("lastWatched")));   // ISO dates sort as text
+            Map<String, Pick> known = new HashMap<>();
+            for (Pick p : resume) known.put(p.resume, p);
+            List<Pick> list = new ArrayList<>();
+            for (JSONObject o : halfway.subList(0, Math.min(20, halfway.size()))) {
+                JSONObject st = o.getJSONObject("state");
+                String id = o.getString("_id"), video = st.optString("video_id", id);
+                if (video.isEmpty()) video = id;
+                Pick p = known.get(id + "/" + video);
+                if (p == null) p = resumePick(o, id, video);
+                long left = (st.optLong("duration") - st.optLong("timeOffset")) / 60_000;
+                String[] ep = video.split(":");
+                String where = ep.length == 3 ? Ui.tr("T" + ep[1] + " E" + ep[2], "S" + ep[1] + " E" + ep[2], "T" + ep[1] + " E" + ep[2]) + " · " : "";
+                p.meta = where + (left > 0 ? Ui.tr("faltam " + left + " min", left + " min left", "quedan " + left + " min") + " · " : "") + "Stremio";
+                list.add(p);
+            }
+            resume = list;
+        } catch (Exception e) {
+            AppLog.w("stremio continue: " + e.getMessage());
+        } finally {
+            resumeAt = System.currentTimeMillis();
+            resuming = false;
+            notifyListeners();
+        }
+    }
+
+    /** A Stremio library item as a card; the photo and the title in the TV's language come from TMDB, by IMDb id. */
+    private Pick resumePick(JSONObject o, String id, String video) {
+        Pick p = new Pick();
+        p.kind = "series".equals(o.optString("type")) ? "tv" : "movie";
+        p.title = o.optString("name");
+        p.id = id.hashCode();
+        p.resume = id + "/" + video;
+        p.imdb = id.startsWith("tt") ? id : null;
+        p.app = null;
+        p.pkg = "com.stremio.one";
+        p.detailed = true;
+        if (p.imdb != null && hasKey(context)) {
+            try {
+                JSONObject found = get("/find/" + p.imdb + "?external_source=imdb_id&language=" + lang());
+                JSONArray r = found.optJSONArray("tv".equals(p.kind) ? "tv_results" : "movie_results");
+                if (r != null && r.length() > 0) {
+                    JSONObject t = r.getJSONObject(0);
+                    p.id = t.optInt("id", p.id);
+                    p.title = t.optString("tv".equals(p.kind) ? "name" : "title", p.title);
+                    String bd = t.optString("backdrop_path", "");
+                    if (!bd.isEmpty() && !"null".equals(bd)) p.backdrop = bd;
+                }
+            } catch (Exception e) {
+                AppLog.w("stremio continue, photo: " + e.getMessage());
+            }
+        }
+        return p;
     }
 
     /** "Law & Order: Special Victims Unit" → "law & order" (what comes before ":" or " - "). */
