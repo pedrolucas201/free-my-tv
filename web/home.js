@@ -2,7 +2,7 @@
  * The home screen for web-app TVs (LG webOS, Samsung Tizen), with the Android app's design and behavior (HomeView):
  *  - top: the "For You" title and the tabs (Explore, Movies, Shows); icon-only glass buttons at the right (Live TV,
  *    HDMI Inputs, Settings) and the crypto quotes at the end of the tab row;
- *  - three picks for this hour in the selected tab; the background is the first one's photo, blurred and almost white;
+ *  - a horizontal recommendation row in the selected tab; the background is the first one's blurred photo;
  *  - the glass shelf with the apps; ↓ opens the drawer (inputs, shortcuts, weather, prices); ↑ or Back closes it;
  *  - a night look from sunset to sunrise; a screensaver after a few idle minutes.
  * The remote's arrows, OK and Back move the focus; a pointer (LG's Magic Remote) focuses what it points at.
@@ -134,7 +134,7 @@
 
   var Z = {TOP: 'top', CARDS: 'cards', SHELF: 'shelf', DRAWER: 'drawer', APPS: 'apps', SETTINGS: 'settings', EDIT: 'edit'};
   var st = {zone: Z.SHELF, top: 0, tab: 0, card: 0, shelf: 0, drawer: 0, grid: 0, row: 0, edit: 0};
-  var cards = [];
+  var cards = [], cardOffset = 0, cardsSignature = '';
 
   function sheetOpen() { return st.zone === Z.APPS || st.zone === Z.SETTINGS || st.zone === Z.EDIT; }
 
@@ -150,6 +150,7 @@
     setClass($('quotes'), 'hide', st.zone === Z.TOP && st.top >= 3);
     list = $('cards').children;
     for (i = 0; i < list.length; i++) setClass(list[i], 'focus', st.zone === Z.CARDS && st.card === i);
+    scrollCards();
     list = $('tiles').children;
     for (i = 0; i < list.length; i++) setClass(list[i], 'focus', st.zone === Z.SHELF && st.shelf === i);
     list = document.querySelectorAll('#drawer .key');
@@ -225,24 +226,50 @@
 
   // MARK: - Picks and background
 
+  /** Use the row's destination, so a quick Down press during a slide cannot select a far-away card. */
+  function nearestCard(x) {
+    var stage = $('stage').getBoundingClientRect();
+    var logicalX = (x - stage.left) * 1920 / stage.width;
+    return Math.max(0, Math.min(cards.length - 1, Math.round((logicalX - 80 + cardOffset - 360) / 760)));
+  }
+
+  function scrollCards() {
+    var left = st.card * 760, right = left + 720;
+    if (left < cardOffset) cardOffset = left;
+    else if (right > cardOffset + 1760) cardOffset = right - 1760;
+    cardOffset = Math.max(0, Math.min(Math.max(0, cards.length * 760 - 40 - 1760), cardOffset));
+    $('cards').style.webkitTransform = $('cards').style.transform = 'translateX(' + (-cardOffset) + 'px)';
+    var first = Math.max(0, Math.floor(cardOffset / 760) - 1), nodes = $('cards').children;
+    for (var i = 0; i < nodes.length; i++) {
+      var image = i >= first && i < first + 6 ? 'url(' + Data.image(cards[i].backdrop, 'w780') + ')' : '';
+      if (nodes[i].firstChild.style.backgroundImage !== image) nodes[i].firstChild.style.backgroundImage = image;
+    }
+    Data.prepare(cards.slice(first, first + 6));
+    if (st.zone === Z.CARDS && st.card >= cards.length - 5) Data.loadMore(TAB_KIND[st.tab]);
+    var progress = '', showStatus = st.zone === Z.CARDS && cards.length;
+    if (showStatus && Data.loadingMore()) progress = tr('Carregando mais…', 'Loading more…', 'Cargando más…');
+    else if (showStatus && Data.moreError()) progress = tr('Sem conexão. Tentando novamente…', 'Offline. Retrying…', 'Sin conexión. Reintentando…');
+    $('cardProgress').textContent = progress;
+  }
+
   function renderCards() {
-    var list = Data.picks(TAB_KIND[st.tab]);
+    var list = Data.catalog(TAB_KIND[st.tab]);
     var holder = $('cards');
     setClass(body, 'no-picks', !list.length);
-    var same = list.length === cards.length;
-    for (var i = 0; same && i < list.length; i++) same = list[i].id === cards[i].id && list[i].backdrop === cards[i].backdrop && list[i].meta === cards[i].meta;
-    if (same && holder.children.length === list.length) return;
+    var signature = JSON.stringify(list.map(function (p) { return [p.kind, p.id, p.backdrop, p.title, p.meta]; }));
+    if (signature === cardsSignature && holder.children.length === list.length) { updateFocus(); return; }
+    cardsSignature = signature;
+    var selected = cards[st.card], selectedKey = selected ? selected.kind + ':' + selected.id : '';
     cards = list;
     holder.innerHTML = '';
-    var rects = [[80, 1040], [1160, 320], [1520, 320]];
     for (var c = 0; c < list.length; c++) {
       var p = list[c], card = el('div', 'card', holder);
-      card.style.left = rects[c][0] + 'px';
-      card.style.width = rects[c][1] + 'px';
-      var img = el('div', 'img', card);
-      img.style.backgroundImage = 'url(' + Data.image(p.backdrop, c === 0 ? 'w1280' : 'w780') + ')';
+      card.style.left = (80 + c * 760) + 'px';
+      card.style.width = '720px';
+      el('div', 'img', card);
       el('div', 'name', card, p.title);
-      if (c === 0 && p.meta) el('div', 'meta', card, p.meta);
+      if (p.meta) el('div', 'meta', card, p.meta);
+      if (p.kind + ':' + p.id === selectedKey) st.card = c;
       hover(card, Z.CARDS, c);
     }
     st.card = Math.min(st.card, Math.max(0, list.length - 1));
@@ -646,6 +673,9 @@
   function selectTab(i) {
     if (i === st.tab) return;
     st.tab = i;
+    st.card = 0;
+    cardOffset = 0;
+    cards = [];
     renderCards();
   }
 
@@ -656,7 +686,7 @@
         if (dx) st.shelf = Math.max(0, Math.min(shelf.length - 1, st.shelf + dx));
         else if (dy > 0) { openDrawer(); return; }
         else if (dy < 0) {
-          if (cards.length) { st.zone = Z.CARDS; st.card = nearest(cardNodes, centerX(tiles[st.shelf])); }
+          if (cards.length) { st.zone = Z.CARDS; st.card = nearestCard(centerX(tiles[st.shelf])); }
           else { st.zone = Z.TOP; st.top = st.tab; }
         }
         break;
@@ -670,7 +700,8 @@
           st.top = Math.max(0, Math.min(5, st.top + dx));
           if (st.top < 3) selectTab(st.top);   // as on Apple TV: focusing a tab selects it
         } else if (dy > 0) {
-          if (cards.length) { st.zone = Z.CARDS; st.card = Math.min(cards.length - 1, st.top < 3 ? 0 : cards.length - 1); }
+          if (cards.length) { st.zone = Z.CARDS; st.card = nearestCard(centerX(st.top < 3
+            ? $('tabs').children[st.top] : $('buttons').children[st.top - 3])); }
           else st.zone = Z.SHELF;
         }
         break;
@@ -849,6 +880,8 @@
     closeSheets();
     st.zone = Z.SHELF;
     st.shelf = 0;
+    st.card = 0;
+    cardOffset = 0;
     if (st.tab !== 0) { st.tab = 0; renderCards(); }
     updateFocus();
   }

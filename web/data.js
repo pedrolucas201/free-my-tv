@@ -235,8 +235,12 @@ var Data = (function () {
   var cache = stored('recs') || {};
   var picks = cache.picks || [], listAt = cache.listAt || 0, period = cache.period, listLang = cache.lang || '', stamp = cache.stamp || '';
   var fetchingRecs = false, failedAt = 0, recsError = '';
+  var fetchingMore = false, moreFailedAt = 0, moreError = '';
+  var nextPage = cache.nextPage || [1, 1], more = cache.more || [true, true];
+  var preparing = {}, detailFailed = {};
 
-  function saveRecs() { store('recs', {picks: picks, listAt: listAt, period: period, lang: listLang, stamp: stamp}); }
+  function saveRecs() { store('recs', {picks: picks, listAt: listAt, period: period, lang: listLang, stamp: stamp,
+    nextPage: nextPage, more: more}); }
 
   function hourPeriod(d) {
     var h = d.getHours();
@@ -257,12 +261,7 @@ var Data = (function () {
 
   /** This hour's 3 picks: movies ("movie"), shows ("tv") or both (null). */
   function now(kind) {
-    var list = [];
-    if (!KEY) return list;
-    for (var i = 0; i < picks.length; i++) {
-      var p = picks[i];
-      if ((kind === null || kind === p.kind) && (!p.detailed || (p.app && appFor(p.app)))) list.push(p);
-    }
+    var list = catalog(kind);
     if (!list.length) return list;
     var hour = Math.floor(Date.now() / 3600000), out = [], seen = {};
     for (var j = 0; j < list.length && out.length < 3; j++) {
@@ -270,6 +269,87 @@ var Data = (function () {
       if (!seen[f]) { seen[f] = true; out.push(q); }
     }
     return out;
+  }
+
+  /** Full list in a stable order, separate from the screensaver's hourly selection. */
+  function catalog(kind) {
+    var list = [];
+    if (!KEY) return list;
+    for (var i = 0; i < picks.length; i++) {
+      var p = picks[i];
+      if ((kind === null || kind === p.kind) && (!p.detailed || (p.app && appFor(p.app)))) list.push(p);
+    }
+    return list;
+  }
+
+  /** Details only for the visible cards and their immediate neighbors. */
+  function prepare(list) {
+    for (var i = 0; i < list.length; i++) (function (p) {
+      var id = keyOf(p), since = Date.now() - (detailFailed[id] || 0);
+      if (p.detailed || preparing[id] || (detailFailed[id] && since >= 0 && since < 30000)) return;
+      preparing[id] = true;
+      details(p, function (err) {
+        delete preparing[id];
+        if (err) { detailFailed[id] = Date.now(); return; }
+        delete detailFailed[id];
+        saveRecs();
+        changed();
+      });
+    })(list[i]);
+  }
+
+  function discoverOptions(done) {
+    tmdb('/watch/providers/movie?language=' + lang() + '&watch_region=' + REGION, function (err, res) {
+      if (err) { done(err); return; }
+      var ids = [];
+      for (var i = 0; res.results && i < res.results.length; i++) {
+        var s = service(res.results[i].provider_name);
+        if (s && appFor(s[1])) ids.push(res.results[i].provider_id);
+      }
+      if (!ids.length) { done(new Error("none of the TV's streaming apps are on TMDB")); return; }
+      done(null, '&language=' + lang() + '&watch_region=' + REGION
+        + '&with_watch_monetization_types=flatrate&include_adult=false&sort_by=popularity.desc&with_watch_providers='
+        + encodeURIComponent(ids.join('|')));
+    });
+  }
+
+  function loadMore(kind) {
+    if (!KEY || fetchingMore || fetchingRecs || !installed.length) return;
+    var since = Date.now() - moreFailedAt;
+    if (moreFailedAt && since >= 0 && since < 30000) return;
+    if (!(kind === null ? more[0] || more[1] : more[kind === 'movie' ? 0 : 1])) return;
+    fetchingMore = true;
+    moreError = '';
+    changed();
+    function finish(err) {
+      fetchingMore = false;
+      moreFailedAt = err ? Date.now() : 0;
+      moreError = err ? 'connection' : '';
+      saveRecs();
+      changed();
+    }
+    discoverOptions(function (err, common) {
+      if (err) { finish(err); return; }
+      var error = null;
+      each([0, 1], function (i, next) {
+        var type = i === 0 ? 'movie' : 'tv';
+        if (!more[i] || (kind !== null && kind !== type)) { next(); return; }
+        tmdb('/discover/' + type + '?vote_count.gte=' + (i === 0 ? 30 : 20) + common + '&page=' + nextPage[i], function (e, res) {
+          if (e) { error = e; next(); return; }
+          var added = [], seen = {}, list = picks.slice();
+          for (var j = 0; j < list.length; j++) seen[keyOf(list[j])] = true;
+          for (var k = 0; k < res.results.length; k++) addPick(added, res.results[k], type);
+          for (var n = 0; n < added.length; n++) if (!seen[keyOf(added[n])]) {
+            seen[keyOf(added[n])] = true;
+            list.push(added[n]);
+          }
+          picks = list;
+          more[i] = nextPage[i] < Math.min(500, res.total_pages || 1);
+          nextPage[i]++;
+          next();
+        });
+      }, function () { finish(error); });
+    });
   }
 
   function lang() { return I18N.locale(); }
@@ -382,10 +462,14 @@ var Data = (function () {
           tmdb('/discover/tv?vote_count.gte=20&air_date.gte=' + day(-90) + '&air_date.lte=' + day(0) + common, function (e2, r2) {
             for (var k = 0; !e2 && k < r2.results.length; k++) addPick(fresh.tv, r2.results[k], 'tv');
             var list = [], seen = {};
-            alternate(list, seen, hot.movie, hot.tv, 24);
-            alternate(list, seen, fresh.movie, fresh.tv, 24);
+            alternate(list, seen, hot.movie, hot.tv, 80);
+            alternate(list, seen, fresh.movie, fresh.tv, 80);
             if (!list.length) { done(new Error('TMDB returned no recommendations')); return; }
             picks = list;
+            nextPage = [1, 1];
+            more = [true, true];
+            moreFailedAt = 0;
+            moreError = '';
             done(null);
           });
         });
@@ -395,7 +479,7 @@ var Data = (function () {
 
   /** Fetches the list when stale (6 h, a new period of the day, language, key or apps), then this hour's details. */
   function refreshRecs() {
-    if (!KEY || fetchingRecs || !installed.length) return;
+    if (!KEY || fetchingRecs || fetchingMore || !installed.length) return;
     var t = Date.now(), p = hourPeriod(new Date()), st = sourceStamp();
     if (st === stamp && failedAt && t - failedAt < 10 * 60000 && t >= failedAt) return;
     var stale = st !== stamp || p !== period || t - listAt > 6 * 3600000 || t < listAt || !picks.length || listLang !== I18N.lang;
@@ -463,6 +547,11 @@ var Data = (function () {
     hasKey: function () { return !!KEY; },
     recsError: function () { return recsError; },
     picks: now,
+    catalog: catalog,
+    prepare: prepare,
+    loadMore: loadMore,
+    loadingMore: function () { return fetchingMore; },
+    moreError: function () { return moreError; },
     showcase: all,
     image: function (path, size) { return path ? 'https://image.tmdb.org/t/p/' + (size || 'w1280') + path : ''; },
 

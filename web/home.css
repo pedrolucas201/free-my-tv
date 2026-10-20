@@ -1,6 +1,6 @@
 /*
  * The home screen on a 1920 × 1080 stage, with the Android app's measurements (HomeView): the title and tabs at the top
- * left, icon-only glass buttons at the top right, three picks, and the glass shelf at the bottom; ↓ on the shelf opens
+ * left, icon-only glass buttons at the top right, a scrolling recommendation row, and the glass shelf; ↓ opens
  * the drawer (inputs, shortcuts, weather, prices). Light by day, dark from sunset to sunrise.
  * No CSS variables, grid or backdrop-filter: older LG TVs (webOS 3 and 4) don't have them, and blur is too heavy for
  * their GPUs. Only transform and opacity animate.
@@ -191,12 +191,24 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .night .round.focus { background: #FFF; color: #1D1D1F; }
 .night .round.focus .tip { color: #F5F5F7; }
 
-/* MARK: - Picks: a wide card and two tall ones; focused, a card grows 5%, rises and its edge lights up. */
+/* MARK: - A horizontal row, with part of the next card visible at the edge. */
+
+#cards {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 790px;
+  -webkit-transition: -webkit-transform 0.28s ease-out;
+  transition: transform 0.28s ease-out;
+}
+#cardProgress { position: absolute; left: 80px; top: 774px; font-size: 23px; color: #6E6E73; }
+.night #cardProgress { color: rgba(245, 245, 247, 0.62); }
 
 .card {
   position: absolute;
   top: 262px;
-  height: 442px;
+  height: 405px;
   -webkit-transition: -webkit-transform 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.15);
   transition: transform 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.15);
 }
@@ -236,7 +248,7 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .card .name {
   position: absolute;
   left: 0;
-  top: 464px;
+  top: 427px;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -251,7 +263,7 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .card .meta {
   position: absolute;
   left: 0;
-  top: 506px;
+  top: 469px;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;

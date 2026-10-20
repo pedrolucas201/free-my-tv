@@ -100,8 +100,9 @@ final class Recs {
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<Listener> listeners = new ArrayList<>();
-    private final Map<String, Backdrop> images = new LinkedHashMap<>();   // this hour's, built and ready to draw
+    private final Map<String, Backdrop> images = new LinkedHashMap<>(16, 0.75f, true);
     private final java.util.Set<String> pending = new java.util.HashSet<>();
+    private final Map<String, Long> imageFailures = new HashMap<>();
     private volatile List<Pick> picks = new ArrayList<>();
     private volatile int period = -1;
     private volatile long listAt;
@@ -110,6 +111,11 @@ final class Recs {
     private volatile boolean light;     // light design: builds only the cards (all three tabs' cards fit in memory)
     private volatile long failedAt, keyStamp;
     private volatile String listLanguage = "";   // language used for the saved titles, genres and texts
+    private volatile boolean loadingMore;
+    private volatile long moreFailedAt;
+    private volatile String moreError = "";
+    private final int[] nextPage = {1, 1};
+    private final boolean[] more = {true, true};
 
     private Recs(Context c) {
         context = c;
@@ -122,6 +128,10 @@ final class Recs {
             listAt = cache.getLong("listAt", 0);
             listLanguage = cache.getString("language", cache.getBoolean("english", false) ? "en" : "pt");
             keyStamp = cache.getLong("keyStamp", 0);
+            for (int i = 0; i < 2; i++) {
+                nextPage[i] = cache.getInt("nextPage" + i, 1);
+                more[i] = cache.getBoolean("more" + i, true);
+            }
         } catch (Exception ignored) {
         }
     }
@@ -172,16 +182,10 @@ final class Recs {
 
     /** This hour's 3, movies only ("movie") or shows only ("tv"); null = both (the home screen tabs). */
     List<Pick> now(String kind) {
-        List<Pick> list = new ArrayList<>();
-        if (!hasKey(context)) return list;    // no TMDB key: no recommendations
-        Map<String, Boolean> have = new HashMap<>();   // one look per app, not per title (this runs every 15 s)
-        for (Pick p : picks) {
-            if ((kind == null || kind.equals(p.kind))
-                    && (!p.detailed || (p.pkg != null && have.computeIfAbsent(p.pkg, this::installed)))) list.add(p);   // app missing: skip
-        }
+        List<Pick> list = catalog(kind);
         if (list.isEmpty()) return list;
         long hour = System.currentTimeMillis() / 3600_000L;
-        // Three per hour, never two from the same franchise ("Law & Order" and "Law & Order: Special…").
+        // Three per hour for the screensaver, never two from the same franchise.
         List<Pick> out = new ArrayList<>();
         java.util.Set<String> seen = new java.util.HashSet<>();
         for (int i = 0; i < list.size() && out.size() < 3; i++) {
@@ -189,6 +193,76 @@ final class Recs {
             if (seen.add(franchise(p.title))) out.add(p);
         }
         return out;
+    }
+
+    /** The browsable list stays in order while the user moves through it. */
+    List<Pick> catalog(String kind) {
+        List<Pick> list = new ArrayList<>();
+        if (!hasKey(context)) return list;    // no TMDB key: no recommendations
+        Map<String, Boolean> have = new HashMap<>();   // one look per app, not per title (this runs every 15 s)
+        for (Pick p : picks) {
+            if ((kind == null || kind.equals(p.kind))
+                    && (!p.detailed || (p.pkg != null && have.computeIfAbsent(p.pkg, this::installed)))) list.add(p);   // app missing: skip
+        }
+        return list;
+    }
+
+    boolean loadingMore() { return loadingMore; }
+    String moreError() { return moreError; }
+
+    /** More popular titles on the TV's services, fetched before the focused card reaches the end. */
+    void loadMore(String kind) {
+        if (!hasKey(context) || fetching || loadingMore) return;
+        long since = System.currentTimeMillis() - moreFailedAt;
+        if (moreFailedAt != 0 && since >= 0 && since < 30_000) return;
+        if (!(kind == null ? more[0] || more[1] : more["movie".equals(kind) ? 0 : 1])) return;
+        loadingMore = true;
+        moreError = "";
+        notifyListeners();
+        io.execute(() -> {
+            try {
+                String common = discoverOptions();
+                for (int i = 0; i < 2; i++) {
+                    String type = i == 0 ? "movie" : "tv";
+                    if (!more[i] || (kind != null && !kind.equals(type))) continue;
+                    JSONObject page = get("/discover/" + type + "?vote_count.gte=" + (i == 0 ? 30 : 20)
+                            + common + "&page=" + nextPage[i]);
+                    List<Pick> list = new ArrayList<>(picks);
+                    java.util.Set<String> seen = new java.util.HashSet<>();
+                    for (Pick pick : list) seen.add(key(pick));
+                    JSONArray results = page.getJSONArray("results");
+                    List<Pick> added = new ArrayList<>();
+                    for (int j = 0; j < results.length(); j++) add(added, results.getJSONObject(j), type);
+                    for (Pick pick : added) if (seen.add(key(pick))) list.add(pick);
+                    picks = list;
+                    more[i] = nextPage[i] < Math.min(500, page.optInt("total_pages", 1));
+                    nextPage[i]++;
+                }
+                moreFailedAt = 0;
+                save();
+            } catch (Exception e) {
+                moreError = "connection";
+                moreFailedAt = System.currentTimeMillis();
+                AppLog.w("more recommendations: " + e.getMessage());
+            } finally {
+                loadingMore = false;
+                notifyListeners();
+            }
+        });
+    }
+
+    private String discoverOptions() throws Exception {
+        JSONArray providers = get("/watch/providers/movie?language=" + lang() + "&watch_region=" + REGION).getJSONArray("results");
+        StringBuilder ids = new StringBuilder();
+        for (int i = 0; i < providers.length(); i++) {
+            JSONObject provider = providers.getJSONObject(i);
+            String[] s = service(provider.optString("provider_name"));
+            if (s != null && installed(s[2])) ids.append(ids.length() == 0 ? "" : "|").append(provider.getInt("provider_id"));
+        }
+        if (ids.length() == 0) throw new IOException("none of the TV's streaming services are on TMDB");
+        return "&language=" + lang() + "&watch_region=" + REGION
+                + "&with_watch_monetization_types=flatrate&include_adult=false&sort_by=popularity.desc&with_watch_providers="
+                + URLEncoder.encode(ids.toString(), "UTF-8");
     }
 
     /** "Law & Order: Special Victims Unit" → "law & order" (what comes before ":" or " - "). */
@@ -211,11 +285,22 @@ final class Recs {
         synchronized (images) {
             Backdrop b = images.get(key);
             if (b != null) return b;
+            Long failed = imageFailures.get(key);
+            long since = failed == null ? Long.MAX_VALUE : System.currentTimeMillis() - failed;
+            if (since >= 0 && since < 30_000) return null;
             if (!pending.add(key)) return null;
         }
         io.execute(() -> {
             try {
-                loadImage(p);
+                if (!p.detailed) {
+                    fetchDetails(p);
+                    save();
+                }
+                if (p.pkg != null) loadImage(p);
+                else notifyListeners();
+            } catch (Exception e) {
+                synchronized (images) { imageFailures.put(key, System.currentTimeMillis()); }
+                AppLog.w("recommendation details: " + e.getMessage());
             } finally {
                 synchronized (images) { pending.remove(key); }
             }
@@ -233,7 +318,7 @@ final class Recs {
 
     /** With a key: fetches the list if stale or the time of day (morning/afternoon/night) changed; then the details. */
     void refreshIfStale() {
-        if (!hasKey(context) || fetching) return;
+        if (!hasKey(context) || fetching || loadingMore) return;
         long now = System.currentTimeMillis();
         long stamp = sourceStamp();   // a new key, country or installed streaming-app set refetches
         boolean newKey = stamp != keyStamp;
@@ -315,11 +400,14 @@ final class Recs {
      * time in the background, so it has more photos. Not used otherwise.
      */
     void prefetchAll() {
-        if (!hasKey(context) || fetching) return;
+        if (!hasKey(context) || fetching || loadingMore) return;
         long sinceFail = System.currentTimeMillis() - failedAt;
         if (failedAt != 0 && sinceFail >= 0 && sinceFail < 10 * 60_000L) return;
         List<Pick> todo = new ArrayList<>();
-        for (Pick p : picks) if (!p.detailed || (p.pkg != null && !hasImage(p))) todo.add(p);
+        for (Pick p : picks) {
+            if (!p.detailed || (p.pkg != null && !hasImage(p))) todo.add(p);
+            if (todo.size() >= 24) break;
+        }
         if (todo.isEmpty()) return;
         fetching = true;
         io.execute(() -> {
@@ -409,16 +497,19 @@ final class Recs {
         List<Pick> newMovies = new ArrayList<>(), newShows = new ArrayList<>();
         for (int i = 0; i < movies.length(); i++) add(newMovies, movies.getJSONObject(i), "movie");
         for (int i = 0; i < shows.length(); i++) add(newShows, shows.getJSONObject(i), "tv");
-        // Trending first, then the new releases; movies and shows alternating, without repeats, up to 24.
+        // Trending first, then the new releases; movies and shows alternating, without repeats.
         List<Pick> list = new ArrayList<>();
         java.util.Set<String> seen = new java.util.HashSet<>();
-        alternate(list, seen, hotMovies, hotShows, 24);
-        alternate(list, seen, newMovies, newShows, 24);
+        alternate(list, seen, hotMovies, hotShows, 80);
+        alternate(list, seen, newMovies, newShows, 80);
         if (list.isEmpty()) throw new IOException("TMDB returned no recommendations");
         picks = list;
         period = p;
         listAt = System.currentTimeMillis();
         listLanguage = Ui.language;
+        for (int i = 0; i < 2; i++) { nextPage[i] = 1; more[i] = true; }
+        moreFailedAt = 0;
+        moreError = "";
     }
 
     /** Language of titles and genres; the services come from the region. */
@@ -622,11 +713,13 @@ final class Recs {
             Backdrop backdrop = Backdrop.make(b, forLight);
             if (forLight != light) return;   // the design changed midway: this one is stale
             synchronized (images) {
+                imageFailures.remove(p.backdrop);
                 images.put(p.backdrop, backdrop);
                 while (images.size() > (forLight ? 10 : 4)) images.remove(images.keySet().iterator().next());
             }
             notifyListeners();
         } catch (IOException | RuntimeException | OutOfMemoryError e) {
+            synchronized (images) { imageFailures.put(p.backdrop, System.currentTimeMillis()); }
             //noinspection ResultOfMethodCallIgnored
             f.delete();
             AppLog.w("recommendation image: " + e.getMessage());
@@ -662,6 +755,8 @@ final class Recs {
             }
             cache.edit().putString("picks", a.toString()).putInt("period", period).putLong("listAt", listAt)
                     .putString("language", listLanguage)
+                    .putInt("nextPage0", nextPage[0]).putInt("nextPage1", nextPage[1])
+                    .putBoolean("more0", more[0]).putBoolean("more1", more[1])
                     .putLong("keyStamp", keyStamp).putInt("version", CACHE_VERSION).apply();
         } catch (Exception ignored) {
         }
