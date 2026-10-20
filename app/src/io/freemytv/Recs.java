@@ -511,10 +511,12 @@ final class Recs {
         if (!hasKey(context) || fetching || loadingMore) return;
         long sinceFail = System.currentTimeMillis() - failedAt;
         if (failedAt != 0 && sinceFail >= 0 && sinceFail < 10 * 60_000L) return;
+        // Only the first 24: with the endless row the list grows past what prune keeps, and the screensaver would
+        // download and delete the same photos every minute.
         List<Pick> todo = new ArrayList<>();
-        for (Pick p : picks) {
+        List<Pick> all = picks;
+        for (Pick p : all.subList(0, Math.min(24, all.size()))) {
             if (!p.detailed || (p.pkg != null && !hasImage(p))) todo.add(p);
-            if (todo.size() >= 24) break;
         }
         if (todo.isEmpty()) return;
         fetching = true;
@@ -774,7 +776,7 @@ final class Recs {
         return key.isEmpty() ? null : key;
     }
 
-    // MARK: - Images (TMDB originals on disk, up to 24 so the whole list fits; this hour's kept ready in memory)
+    // MARK: - Images (TMDB originals on disk, up to 48: the screensaver's 24 plus browsed cards; this hour's kept ready in memory)
 
     private void download(Pick p) throws IOException {
         File f = imageFile(p);
@@ -842,9 +844,10 @@ final class Recs {
 
     private static void prune(File dir) {
         File[] files = dir.listFiles((d, name) -> !name.endsWith(".part"));
-        if (files == null || files.length <= 24) return;
+        // 48: the screensaver's 24 plus room for the cards browsed further along and the Continue tab.
+        if (files == null || files.length <= 48) return;
         Arrays.sort(files, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
-        for (int i = 0; i < files.length - 24; i++) {
+        for (int i = 0; i < files.length - 48; i++) {
             //noinspection ResultOfMethodCallIgnored
             files[i].delete();
         }
