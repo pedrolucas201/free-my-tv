@@ -1,6 +1,6 @@
 /*
  * The home screen on a 1920 × 1080 stage, with the Android app's measurements (HomeView): the title and tabs at the top
- * left, icon-only glass buttons at the top right, a scrolling recommendation row, and the glass shelf; ↓ opens
+ * left, icon-only glass buttons at the top right, three picks, and the glass shelf at the bottom; ↓ on the shelf opens
  * the drawer (inputs, shortcuts, weather, prices). Light by day, dark from sunset to sunrise.
  * No CSS variables, grid or backdrop-filter: older LG TVs (webOS 3 and 4) don't have them, and blur is too heavy for
  * their GPUs. Only transform and opacity animate.
@@ -77,14 +77,17 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 #saver { z-index: 4; }
 
 #home, #drawer {
-  -webkit-transition: -webkit-transform 0.55s cubic-bezier(0.32, 0.72, 0.2, 1), opacity 0.4s;
-  transition: transform 0.55s cubic-bezier(0.32, 0.72, 0.2, 1), opacity 0.4s;
+  -webkit-transition: -webkit-transform 0.38s cubic-bezier(0.32, 0.72, 0.2, 1), opacity 0.28s;
+  transition: transform 0.38s cubic-bezier(0.32, 0.72, 0.2, 1), opacity 0.28s;
 }
 .drawer-open #home { -webkit-transform: translateY(-560px); transform: translateY(-560px); }
-#top { -webkit-transition: opacity 0.3s; transition: opacity 0.3s; }
+#top { -webkit-transition: opacity 0.2s; transition: opacity 0.2s; }
 .drawer-open #top { opacity: 0; }
 #drawer { -webkit-transform: translateY(560px); transform: translateY(560px); opacity: 0; }
 .drawer-open #drawer { -webkit-transform: none; transform: none; opacity: 1; }
+/* Closed, it still spans the screen below the shelf: only its keys take the pointer, and only when it's open. */
+#drawer { pointer-events: none; }
+.drawer-open #drawer .key { pointer-events: auto; }
 
 /* MARK: - Title and tabs */
 
@@ -115,8 +118,8 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   font-weight: 500;
   line-height: 68px;
   color: #6E6E73;
-  -webkit-transition: -webkit-transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.2), background-color 0.25s, box-shadow 0.3s, color 0.25s;
-  transition: transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.2), background-color 0.25s, box-shadow 0.3s, color 0.25s;
+  -webkit-transition: -webkit-transform 0.2s cubic-bezier(0.2, 0.9, 0.3, 1.2), background-color 0.17s, box-shadow 0.2s, color 0.17s;
+  transition: transform 0.2s cubic-bezier(0.2, 0.9, 0.3, 1.2), background-color 0.17s, box-shadow 0.2s, color 0.17s;
 }
 .tab.on { font-weight: 600; color: #1D1D1F; }
 .tab.focus {
@@ -140,8 +143,8 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   line-height: 28px;
   color: #8E8E93;
   white-space: nowrap;
-  -webkit-transition: opacity 0.25s;
-  transition: opacity 0.25s;
+  -webkit-transition: opacity 0.17s;
+  transition: opacity 0.17s;
   font-feature-settings: 'tnum';
 }
 #quotes .q { display: inline-block; margin-left: 24px; }
@@ -161,8 +164,8 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   background: linear-gradient(rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.5));
   box-shadow: 0 6px 26px rgba(0, 0, 0, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.9), inset 0 0 0 1px rgba(255, 255, 255, 0.5);
   color: #1D1D1F;
-  -webkit-transition: -webkit-transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.2), box-shadow 0.3s, background-color 0.25s;
-  transition: transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.2), box-shadow 0.3s, background-color 0.25s;
+  -webkit-transition: -webkit-transform 0.2s cubic-bezier(0.2, 0.9, 0.3, 1.2), box-shadow 0.2s, background-color 0.17s;
+  transition: transform 0.2s cubic-bezier(0.2, 0.9, 0.3, 1.2), box-shadow 0.2s, background-color 0.17s;
 }
 .round .sym { position: absolute; left: 20px; top: 20px; width: 28px; height: 28px; }
 .round.focus { background: #FFF; -webkit-transform: scale(1.1); transform: scale(1.1); box-shadow: 0 14px 30px rgba(0, 0, 0, 0.24); }
@@ -177,8 +180,8 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   font-weight: 600;
   white-space: nowrap;
   opacity: 0;
-  -webkit-transition: opacity 0.2s;
-  transition: opacity 0.2s;
+  -webkit-transition: opacity 0.14s;
+  transition: opacity 0.14s;
 }
 .round.last .tip { left: auto; right: -10px; margin-left: 0; text-align: right; }
 .round.focus .tip { opacity: 1; }
@@ -191,26 +194,14 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .night .round.focus { background: #FFF; color: #1D1D1F; }
 .night .round.focus .tip { color: #F5F5F7; }
 
-/* MARK: - A horizontal row, with part of the next card visible at the edge. */
-
-#cards {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 100%;
-  height: 790px;
-  -webkit-transition: -webkit-transform 0.28s ease-out;
-  transition: transform 0.28s ease-out;
-}
-#cardProgress { position: absolute; left: 80px; top: 774px; font-size: 23px; color: #6E6E73; }
-.night #cardProgress { color: rgba(245, 245, 247, 0.62); }
+/* MARK: - Picks: a wide card and two tall ones; focused, a card grows 5%, rises and its edge lights up. */
 
 .card {
   position: absolute;
   top: 262px;
-  height: 405px;
-  -webkit-transition: -webkit-transform 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.15);
-  transition: transform 0.32s cubic-bezier(0.2, 0.9, 0.3, 1.15);
+  height: 442px;
+  -webkit-transition: -webkit-transform 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.15);
+  transition: transform 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.15);
 }
 .card .img {
   position: absolute;
@@ -224,8 +215,8 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   background-size: cover;
   background-position: center;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.14);
-  -webkit-transition: box-shadow 0.32s;
-  transition: box-shadow 0.32s;
+  -webkit-transition: box-shadow 0.22s;
+  transition: box-shadow 0.22s;
 }
 .card .img::after {
   content: '';
@@ -239,8 +230,8 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   background: -webkit-linear-gradient(-60deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0) 55%);
   background: linear-gradient(150deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0) 55%);
   opacity: 0;
-  -webkit-transition: opacity 0.25s;
-  transition: opacity 0.25s;
+  -webkit-transition: opacity 0.17s;
+  transition: opacity 0.17s;
 }
 .card.focus { -webkit-transform: translateY(-6px) scale(1.05); transform: translateY(-6px) scale(1.05); z-index: 2; }
 .card.focus .img { box-shadow: 0 24px 46px rgba(0, 0, 0, 0.34); }
@@ -248,7 +239,7 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .card .name {
   position: absolute;
   left: 0;
-  top: 427px;
+  top: 464px;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -263,7 +254,7 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .card .meta {
   position: absolute;
   left: 0;
-  top: 469px;
+  top: 506px;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -309,6 +300,30 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   background: linear-gradient(rgba(34, 34, 38, 0.72), rgba(17, 17, 19, 0.6));
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.32), inset 0 1.5px 0 rgba(255, 255, 255, 0.14), inset 0 0 0 1px rgba(255, 255, 255, 0.08);
 }
+/* The shelf has the focus: a rim just outside the glass (dark by day: white wouldn't show on it). */
+#platter::before {
+  content: '';
+  position: absolute;
+  left: -9px;
+  top: -9px;
+  right: -9px;
+  bottom: -9px;
+  border-radius: 71px;
+  border: 3px solid rgba(58, 58, 60, 0.45);
+  opacity: 0;
+  -webkit-transition: opacity 0.2s;
+  transition: opacity 0.2s;
+}
+.night #platter::before { border-color: rgba(255, 255, 255, 0.8); }
+#platter.on::before { opacity: 1; }
+
+#tiles {
+  position: absolute;
+  left: 0;
+  top: 0;
+  -webkit-transition: -webkit-transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1);
+  transition: transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
 
 .tile {
   position: absolute;
@@ -318,10 +333,12 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   overflow: hidden;
   color: #FFF;
   box-shadow: 0 4px 22px rgba(0, 0, 0, 0.14);
-  -webkit-transition: -webkit-transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.2), box-shadow 0.3s;
-  transition: transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.2), box-shadow 0.3s;
+  -webkit-transition: -webkit-transform 0.2s cubic-bezier(0.2, 0.9, 0.3, 1.2), box-shadow 0.2s, opacity 0.3s;
+  transition: transform 0.2s cubic-bezier(0.2, 0.9, 0.3, 1.2), box-shadow 0.2s, opacity 0.3s;
 }
 .tile img { position: absolute; left: 50%; top: 50%; max-width: 76%; max-height: 62%; -webkit-transform: translate(-50%, -50%); transform: translate(-50%, -50%); }
+/* a logo lifted off the TV's icon (home.js): as large as the tile allows */
+.tile img.logo { width: 70%; height: 50%; max-width: none; max-height: none; object-fit: contain; }
 .tile .word {
   position: absolute;
   left: 8%;
@@ -348,13 +365,35 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   background: -webkit-linear-gradient(top, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0));
   background: linear-gradient(rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0));
   opacity: 0;
-  -webkit-transition: opacity 0.25s;
-  transition: opacity 0.25s;
+  -webkit-transition: opacity 0.17s;
+  transition: opacity 0.17s;
 }
 .tile.focus { -webkit-transform: scale(1.2); transform: scale(1.2); box-shadow: 0 18px 40px rgba(0, 0, 0, 0.34); z-index: 2; }
 .tile.focus::after { opacity: 1; }
+/* Which one has the focus, at a glance: while the shelf has it, a shade on the other tiles and a light rim on it (as on
+   the focused card). Above the logo; only the opacity animates. */
+.tile::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  border-radius: 22px;
+  background: rgba(0, 0, 0, 0.34);
+  opacity: 0;
+  -webkit-transition: opacity 0.2s;
+  transition: opacity 0.2s;
+}
+.night .tile::before { background: rgba(0, 0, 0, 0.48); }
+#tiles.on .tile::before { opacity: 1; }
+#tiles.on .tile.focus::before { background: none; box-shadow: inset 0 0 0 2.5px rgba(255, 255, 255, 0.85); }
 .night .tile { box-shadow: 0 4px 22px rgba(0, 0, 0, 0.3); }
 .night .tile.focus { box-shadow: 0 18px 40px rgba(0, 0, 0, 0.6); }
+.more { position: absolute; width: 17px; height: 17px; color: rgba(0, 0, 0, 0.6); }
+.more.back { -webkit-transform: scaleX(-1); transform: scaleX(-1); }
+.night .more { color: rgba(255, 255, 255, 0.8); }
 
 /* MARK: - Drawer: inputs and shortcuts, weather, prices */
 
@@ -379,8 +418,8 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   border-radius: 20px;
   text-align: center;
   color: #1D1D1F;
-  -webkit-transition: -webkit-transform 0.28s cubic-bezier(0.2, 0.9, 0.3, 1.2), box-shadow 0.28s, background-color 0.2s;
-  transition: transform 0.28s cubic-bezier(0.2, 0.9, 0.3, 1.2), box-shadow 0.28s, background-color 0.2s;
+  -webkit-transition: -webkit-transform 0.19s cubic-bezier(0.2, 0.9, 0.3, 1.2), box-shadow 0.19s, background-color 0.14s;
+  transition: transform 0.19s cubic-bezier(0.2, 0.9, 0.3, 1.2), box-shadow 0.19s, background-color 0.14s;
 }
 .key .sym { position: absolute; left: 50%; top: 33px; width: 34px; height: 34px; margin-left: -17px; }
 .key .label { position: absolute; left: 8px; right: 8px; top: 82px; font-size: 23px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -408,10 +447,11 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 #weather .hour .t { font-size: 22px; font-weight: 500; color: #6E6E73; }
 #weather .hour .sym { display: block; width: 30px; height: 30px; margin: 22px auto 18px; }
 #weather .hour .d { font-size: 26px; font-weight: 500; }
+#weather .hour .low { margin-left: 6px; font-size: 22px; color: #6E6E73; }
 #weather .sun { position: absolute; left: 422px; top: 236px; font-size: 23px; font-weight: 500; color: #6E6E73; white-space: nowrap; }
 #weather .sun .sym { width: 22px; height: 22px; vertical-align: -3px; margin-right: 10px; }
 #weather .sun span { margin-right: 36px; }
-.night #weather .range, .night #weather .hour .t, .night #weather .sun { color: rgba(255, 255, 255, 0.68); }
+.night #weather .range, .night #weather .hour .t, .night #weather .hour .low, .night #weather .sun { color: rgba(255, 255, 255, 0.68); }
 .night #weather .split { background: rgba(255, 255, 255, 0.14); }
 
 #prices .coin { position: absolute; left: 34px; right: 34px; height: 40px; font-size: 29px; font-weight: 500; white-space: nowrap; }
@@ -432,15 +472,16 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   color: #FFF;
   opacity: 0;
   visibility: hidden;
+  pointer-events: none; /* while it fades out, the pointer goes to what's under it, not to its rows */
   -webkit-transform: scale(1.04);
   transform: scale(1.04);
-  -webkit-transition: opacity 0.35s, -webkit-transform 0.45s cubic-bezier(0.2, 0.9, 0.3, 1), visibility 0s 0.45s;
-  transition: opacity 0.35s, transform 0.45s cubic-bezier(0.2, 0.9, 0.3, 1), visibility 0s 0.45s;
+  -webkit-transition: opacity 0.24s, -webkit-transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1), visibility 0s 0.3s;
+  transition: opacity 0.24s, transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1), visibility 0s 0.3s;
 }
-.sheet.open { opacity: 1; visibility: visible; -webkit-transform: none; transform: none; -webkit-transition-delay: 0s; transition-delay: 0s; }
+.sheet.open { opacity: 1; visibility: visible; pointer-events: auto; -webkit-transform: none; transform: none; -webkit-transition-delay: 0s; transition-delay: 0s; }
 .sheet h2 { position: absolute; left: 0; right: 0; top: 84px; margin: 0; text-align: center; font-size: 40px; font-weight: 600; }
 
-#apps .grid { position: absolute; left: 0; top: 0; width: 1920px; -webkit-transition: -webkit-transform 0.4s cubic-bezier(0.2, 0.9, 0.3, 1); transition: transform 0.4s cubic-bezier(0.2, 0.9, 0.3, 1); }
+#apps .grid { position: absolute; left: 0; top: 0; width: 1920px; -webkit-transition: -webkit-transform 0.28s cubic-bezier(0.2, 0.9, 0.3, 1); transition: transform 0.28s cubic-bezier(0.2, 0.9, 0.3, 1); }
 .cell { position: absolute; width: 300px; height: 169px; }
 .cell .face {
   position: absolute;
@@ -451,16 +492,17 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   border-radius: 22px;
   overflow: hidden;
   box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.08);
-  -webkit-transition: -webkit-transform 0.28s cubic-bezier(0.2, 0.9, 0.3, 1.2), box-shadow 0.28s;
-  transition: transform 0.28s cubic-bezier(0.2, 0.9, 0.3, 1.2), box-shadow 0.28s;
+  -webkit-transition: -webkit-transform 0.19s cubic-bezier(0.2, 0.9, 0.3, 1.2), box-shadow 0.19s;
+  transition: transform 0.19s cubic-bezier(0.2, 0.9, 0.3, 1.2), box-shadow 0.19s;
 }
 .cell .face img { position: absolute; left: 50%; top: 50%; max-width: 70%; max-height: 60%; -webkit-transform: translate(-50%, -50%); transform: translate(-50%, -50%); }
+.cell .face img.logo { width: 64%; height: 46%; max-width: none; max-height: none; object-fit: contain; }
 .cell .face .word { position: absolute; left: 6%; right: 6%; top: 50%; margin-top: -22px; height: 44px; line-height: 44px; text-align: center; font-size: 32px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #FFF; }
 .cell .label { position: absolute; left: 0; right: 0; top: 186px; text-align: center; font-size: 24px; font-weight: 500; color: rgba(255, 255, 255, 0.6); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cell.focus .face { -webkit-transform: scale(1.08); transform: scale(1.08); box-shadow: 0 16px 34px rgba(0, 0, 0, 0.55), inset 0 0 0 2px rgba(255, 255, 255, 0.4); }
 .cell.focus .label { color: #FFF; }
 
-#settings .box, #shelfedit .box {
+#settings .box, #shelfedit .box, #langpick .box {
   position: absolute;
   left: 560px;
   top: 150px;
@@ -475,15 +517,16 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .box .title { font-size: 38px; font-weight: 700; padding: 6px 18px 18px; letter-spacing: -0.01em; }
 .box .title .sym { width: 36px; height: 36px; vertical-align: -5px; margin-right: 14px; color: rgba(255, 255, 255, 0.85); }
 .box .list { position: relative; overflow: hidden; }
-.box .rows { -webkit-transition: -webkit-transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1); transition: transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1); }
-.box .row { position: relative; height: 70px; margin-bottom: 8px; border-radius: 20px; font-size: 30px; font-weight: 600; line-height: 70px; padding: 0 24px; white-space: nowrap; -webkit-transition: background-color 0.18s; transition: background-color 0.18s; }
+.box .rows { -webkit-transition: -webkit-transform 0.2s cubic-bezier(0.2, 0.9, 0.3, 1); transition: transform 0.2s cubic-bezier(0.2, 0.9, 0.3, 1); }
+.box .row { position: relative; height: 70px; margin-bottom: 8px; border-radius: 20px; font-size: 30px; font-weight: 600; line-height: 70px; padding: 0 24px; white-space: nowrap; -webkit-transition: background-color 0.13s; transition: background-color 0.13s; }
 .box .row.focus { background: rgba(255, 255, 255, 0.13); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14); }
 .box .row .value { position: absolute; right: 24px; top: 0; color: rgba(255, 255, 255, 0.92); font-weight: 500; }
 .box .row .value .chev { color: rgba(255, 255, 255, 0.35); margin: 0 10px; }
+.box .row .value .sym { width: 26px; height: 26px; vertical-align: -3px; }
 .box .row.dim { color: rgba(255, 255, 255, 0.4); }
 .box .hint { padding: 14px 18px 0; font-size: 22px; font-weight: 500; color: rgba(255, 255, 255, 0.5); }
-.toggle { position: absolute; right: 24px; top: 13px; width: 78px; height: 44px; border-radius: 22px; background: #3A3D45; -webkit-transition: background-color 0.2s; transition: background-color 0.2s; }
-.toggle::after { content: ''; position: absolute; left: 4px; top: 4px; width: 36px; height: 36px; border-radius: 18px; background: #FFF; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35); -webkit-transition: -webkit-transform 0.2s; transition: transform 0.2s; }
+.toggle { position: absolute; right: 24px; top: 13px; width: 78px; height: 44px; border-radius: 22px; background: #3A3D45; -webkit-transition: background-color 0.14s; transition: background-color 0.14s; }
+.toggle::after { content: ''; position: absolute; left: 4px; top: 4px; width: 36px; height: 36px; border-radius: 18px; background: #FFF; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35); -webkit-transition: -webkit-transform 0.14s; transition: transform 0.14s; }
 .toggle.on { background: #3FD69B; }
 .toggle.on::after { -webkit-transform: translateX(34px); transform: translateX(34px); }
 
@@ -528,8 +571,8 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
   background: rgba(17, 17, 19, 0.86);
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.14);
   opacity: 0;
-  -webkit-transition: opacity 0.3s, -webkit-transform 0.3s;
-  transition: opacity 0.3s, transform 0.3s;
+  -webkit-transition: opacity 0.2s, -webkit-transform 0.2s;
+  transition: opacity 0.2s, transform 0.2s;
   z-index: 50;
 }
 #toast.on { opacity: 1; -webkit-transform: translate(-50%, 0); transform: translate(-50%, 0); }

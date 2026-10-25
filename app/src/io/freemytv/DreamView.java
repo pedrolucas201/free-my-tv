@@ -37,6 +37,7 @@ import java.util.concurrent.Executors;
  *    through the digits, bent at the edges; Shaders.GLASS_TEXT) and the compact prices;
  *  - bottom left, the photo's caption: the time-of-day label ("TONIGHT"), the title, and genre · runtime · service.
  * Dark scrims only where there is text, stronger where the photo is bright. Any key exits (as on Apple TV).
+ * With your own photos on (Photos), those instead, without a caption.
  * Without photos (no TMDB key, or before the first fetch): the big clock over the night aurora.
  */
 final class DreamView extends View implements Choreographer.FrameCallback, HomeData.Listener, Recs.Listener {
@@ -47,6 +48,10 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
     private static final float MARGIN = 80, RIGHT = 1840, TITLE_W = 900, META_BASE = 1008;
     private static final float DATE_BASE = 92, CLOCK_TOP = 120, CLOCK_SIZE = 200, QUOTES_GAP = 52;
     private static final double DRIFT_PERIOD_S = 600;
+    // The high and low and the stale prices line, made again only when they change (drawn on every frame).
+    private String range = "", staleLine = "", staleFor = "";
+    private HomeData.Weather rangeWeather;
+    private int rangeGeneration = -1, rangePrefs = -1, staleGeneration = -1;
 
     /** One photo on screen: the image, its motion (zooming in or out, toward a corner) and its caption. */
     private static final class Slide {
@@ -149,7 +154,7 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
         try {
             glassShader = new RuntimeShader(Shaders.GLASS_TEXT);
             glassPaint.setShader(glassShader);
-        } catch (RuntimeException | LinkageError e) {   // Android 9 to 12: no AGSL
+        } catch (RuntimeException | LinkageError e) {   // Android 8 to 12: no AGSL
             AppLog.w("glass clock unavailable: " + e.getMessage());
             glassShader = null;
         }
@@ -164,12 +169,13 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
         startedAt = clock();
         lastFrame = 0;
         failed.clear();
-        fallback = recs.showcase().isEmpty();
+        fallback = photos().isEmpty();
         data.addListener(this);
         recs.addListener(this);
         data.refreshIfStale();
         recs.refreshIfStale();
         recs.prefetchAll();
+        Photos.importInbox(getContext(), () -> { if (running) prepareNext(); });
         prepareNext();
         handler.postDelayed(tick, 60_000);
         Choreographer.getInstance().postFrameCallback(this);
@@ -243,6 +249,8 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
         titlePaint.setLetterSpacing(0.005f);
         metaPaint = Ui.text(Ui.medium, 29 * k, 0xC7FFFFFF);
         metaPaint.setLetterSpacing(0.014f);
+        Symbols.warmWeather(getContext(), 30 * k);   // the corner's
+        Symbols.warmWeather(getContext(), 32 * k);   // under the clock
         for (Paint p : new Paint[] {cornerDate, cornerQuote, cornerStale, cornerClock, labelPaint, titlePaint, metaPaint}) {
             p.setShadowLayer(18 * k, 0, 2 * k, 0x66000000);
         }
@@ -254,10 +262,15 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
 
     // MARK: - Photos
 
+    /** Your photos when they are on, otherwise the picks'. */
+    private List<Recs.Pick> photos() {
+        return Photos.on(getContext()) ? Photos.picks(getContext()) : recs.showcase();
+    }
+
     /** Loads the next photo in the background (one at a time); once ready, it comes in at the right moment. */
     private void prepareNext() {
         if (!running || decoding || prepared != null) return;
-        List<Recs.Pick> list = recs.showcase();
+        List<Recs.Pick> list = photos();
         if (list.isEmpty()) return;
         Slide last = incoming != null ? incoming : current;
         int start = 0;
@@ -283,7 +296,7 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
             prepared = newSlide(pick, last.image, last.frost, last.lightCaption, last.lightClock);
             return;
         }
-        File file = recs.readyImage(pick);
+        File file = pick.photo != null ? (pick.photo.exists() ? pick.photo : null) : recs.readyImage(pick);
         if (file == null) {
             failed.add(Recs.key(pick));   // the image is gone from disk: try the next one
             prepareNext();
@@ -297,9 +310,9 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
             float[] light = new float[2];
             try {
                 images = Backdrop.photo(file, PW, PH, light);
-                images[0] = Backdrop.gpu(withScrims(images[0], light[0], light[1]));
+                images[0] = Backdrop.gpu(withScrims(images[0], chosen.photo == null, light[0], light[1]));
             } catch (Exception | OutOfMemoryError e) {
-                AppLog.w("screensaver: photo for “" + chosen.title + "”: " + e.getMessage());
+                AppLog.w("screensaver: photo for “" + (chosen.photo != null ? chosen.photo.getName() : chosen.title) + "”: " + e.getMessage());
             }
             final Bitmap[] ready = images;
             handler.post(() -> {
@@ -454,11 +467,11 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
      * background): each frame draws only the photo (the TV's GPU feels every full-screen layer). With the slow zoom,
      * they move a little along with the photo, which makes no difference to the text.
      */
-    private static Bitmap withScrims(Bitmap photo, float lightCaption, float lightClock) {
+    private static Bitmap withScrims(Bitmap photo, boolean withCaption, float lightCaption, float lightClock) {
         int w = photo.getWidth(), h = photo.getHeight();
         Canvas c = new Canvas(photo);
         Paint p = new Paint(Paint.DITHER_FLAG);
-        float caption = scrimStrength(lightCaption, 0.5f), corner = scrimStrength(lightClock, 0.42f);
+        float caption = withCaption ? scrimStrength(lightCaption, 0.5f) : 0, corner = scrimStrength(lightClock, 0.42f);
         p.setShader(new LinearGradient(0, h, 0, h * 0.42f,
                 new int[] {black(0.55f * caption), black(0.33f * caption), black(0.11f * caption), 0},
                 new float[] {0, 0.35f, 0.7f, 1}, Shader.TileMode.CLAMP));
@@ -673,6 +686,7 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
     private void recordCaption(Slide s) {
         Canvas c = s.caption.beginRecording(w, h);
         try {
+            if (s.pick.photo != null) return;   // your photos have no caption
             float x = MARGIN * k, metaBase = META_BASE * k, titleBase = metaBase - 58 * k;
             String title = s.pick.title == null ? "" : s.pick.title;
             StaticLayout t = StaticLayout.Builder.obtain(title, 0, title.length(), titlePaint, Math.round(TITLE_W * k))
@@ -754,8 +768,12 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
             float base = clockBase + 76 * k;
             String symbol = Symbols.weather(wx.code, wx.isDay);
             String now = HomeData.degrees(wx.temp);
-            String range = Ui.en ? "H:" + HomeData.degrees(wx.max) + "  L:" + HomeData.degrees(wx.min)
-                    : "Máx. " + HomeData.degrees(wx.max) + "  Mín. " + HomeData.degrees(wx.min);
+            if (wx != rangeWeather || Ui.generation != rangeGeneration || Prefs.version != rangePrefs) {
+                range = HomeData.highLow(wx, "  ");
+                rangeWeather = wx;
+                rangeGeneration = Ui.generation;
+                rangePrefs = Prefs.version;
+            }
             float sw = Symbols.width(getContext(), symbol, 32 * k);
             float width = sw + 12 * k + weatherPaint.measureText(now) + 18 * k + weatherDim.measureText(range);
             float x = cx - width / 2;
@@ -784,6 +802,13 @@ final class DreamView extends View implements Choreographer.FrameCallback, HomeD
             x += quotePaint.measureText(values[i]) + spacing;
         }
         String stale = HomeData.staleness(data.pricesAt, 5 * 60_000L);
-        if (!stale.isEmpty() && values.length > 0) c.drawText(Ui.tr("cotações de ", "prices from ") + stale, cx, base + 38 * k, stalePaint);
+        if (!stale.isEmpty() && values.length > 0) {
+            if (!stale.equals(staleFor) || Ui.generation != staleGeneration) {
+                staleLine = Ui.trf("prices from {ago}", "ago", stale);
+                staleFor = stale;
+                staleGeneration = Ui.generation;
+            }
+            c.drawText(staleLine, cx, base + 38 * k, stalePaint);
+        }
     }
 }

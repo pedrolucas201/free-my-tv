@@ -12,6 +12,7 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction;
 import android.view.accessibility.AccessibilityNodeProvider;
 import android.widget.Button;
+import android.widget.TextView;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -34,6 +35,11 @@ final class Spoken extends AccessibilityNodeProvider {
         void focus(int id);
         /** OK on this item (TalkBack's click). */
         void click(int id);
+        /** False for what is only there to be read (a widget): it takes the focus, so TalkBack gets to it, but OK does nothing. */
+        default boolean clickable(int id) { return true; }
+        /** True if holding OK on this item does something (TalkBack's long click). */
+        default boolean holdable(int id) { return false; }
+        default void hold(int id) {}
     }
 
     /** TalkBack's click and the remote's OK can both arrive for one press: only the first counts. */
@@ -95,10 +101,10 @@ final class Spoken extends AccessibilityNodeProvider {
         }
         String text = source.text(id);
         if (text.isEmpty() || !source.bounds(id, bounds)) return null;
-        boolean focused = id == source.focused();
+        boolean clickable = source.clickable(id), focused = id == source.focused();
         AccessibilityNodeInfo info = AccessibilityNodeInfo.obtain(host, id);
         info.setPackageName(host.getContext().getPackageName());
-        info.setClassName(Button.class.getName());
+        info.setClassName(clickable ? Button.class.getName() : TextView.class.getName());
         info.setParent(host);
         info.setText(text);
         info.setBoundsInParent(bounds);
@@ -110,8 +116,12 @@ final class Spoken extends AccessibilityNodeProvider {
         info.setImportantForAccessibility(true);
         info.setFocusable(true);
         info.setFocused(focused);
-        info.setClickable(true);
-        info.addAction(AccessibilityAction.ACTION_CLICK);
+        info.setClickable(clickable);
+        if (clickable) info.addAction(AccessibilityAction.ACTION_CLICK);
+        if (source.holdable(id)) {
+            info.setLongClickable(true);
+            info.addAction(AccessibilityAction.ACTION_LONG_CLICK);
+        }
         if (!focused) info.addAction(AccessibilityAction.ACTION_FOCUS);
         info.setAccessibilityFocused(id == accessibilityFocused);
         info.addAction(id == accessibilityFocused ? AccessibilityAction.ACTION_CLEAR_ACCESSIBILITY_FOCUS
@@ -121,6 +131,7 @@ final class Spoken extends AccessibilityNodeProvider {
 
     @Override public boolean performAction(int id, int action, Bundle arguments) {
         if (id == HOST_VIEW_ID) return host.performAccessibilityAction(action, arguments);
+        if (action == AccessibilityNodeInfo.ACTION_CLICK && !source.clickable(id)) return false;
         switch (action) {
             case AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS:
                 if (accessibilityFocused == id) return false;
@@ -142,6 +153,11 @@ final class Spoken extends AccessibilityNodeProvider {
                     follow(id);
                     source.click(id);
                 }
+                return true;
+            case AccessibilityNodeInfo.ACTION_LONG_CLICK:
+                if (!source.holdable(id)) return false;
+                follow(id);
+                source.hold(id);
                 return true;
             default:
                 return false;

@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Builds FreeMyTV.apk without Gradle: aapt2 -> javac -> d8 -> zipalign -> apksigner.
 # Needs a JDK (17+) and the Android SDK command-line tools (build-tools 34+, platform android-34). See README.md.
+#   ./build.sh             with config.properties (your city, your TMDB key)
+#   ./build.sh --generic   without it, as the APK on GitHub's releases: no key, and the TV's time zone gives the city
 set -euo pipefail
 cd "$(dirname "$0")"
+GENERIC=false
+for arg in "$@"; do [ "$arg" = "--generic" ] && GENERIC=true; done
 
 # --- Tools
 SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
@@ -21,13 +25,16 @@ KEYTOOL="${JAVA_HOME:+$JAVA_HOME/bin/}keytool"
 command -v "$JAVAC" >/dev/null 2>&1 || { echo "JDK not found. Install JDK 17 and set JAVA_HOME."; exit 1; }
 
 # --- Settings: config.properties -> Config.java
-if [ ! -f config.properties ]; then
+CONFIG=config.properties
+if $GENERIC; then
+  CONFIG=/dev/null   # every value at its default; the place comes from the TV's time zone (Place)
+elif [ ! -f config.properties ]; then
   cp config.example.properties config.properties
   echo "Created config.properties: add your TMDB key and your city there (optional), then build again."
 fi
 prop() {
   local v
-  v="$(grep -E "^[[:space:]]*$1[[:space:]]*=" config.properties | tail -1 | cut -d= -f2- || true)"
+  v="$(grep -E "^[[:space:]]*$1[[:space:]]*=" "$CONFIG" | tail -1 | cut -d= -f2- || true)"
   v="$(printf '%s' "$v" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr -d '"\\')"
   printf '%s' "${v:-$2}"
 }
@@ -36,10 +43,17 @@ number() {
   [[ "$v" =~ ^-?[0-9]+(\.[0-9]+)?$ ]] || { echo "config.properties: $1 must be a number (got \"$v\")" >&2; exit 1; }
   printf '%s' "$v"
 }
-LAT="$(number latitude 40.7128)"
-LON="$(number longitude -74.0060)"
+if $GENERIC; then
+  LAT=""; LON=""; REGION=""; CURRENCY=""
+else
+  LAT="$(number latitude 40.7128)"
+  LON="$(number longitude -74.0060)"
+  REGION="$(prop tmdb_region US)"
+  CURRENCY="$(prop currency USD)"
+fi
 ASSIST=false; [ "$(prop disable_assistant false)" = "true" ] && ASSIST=true
 CRYPTO=false; [ "$(prop show_crypto true)" = "true" ] && CRYPTO=true
+ANIMATION=false; [ "$(prop hide_animation false)" = "true" ] && ANIMATION=true
 
 rm -rf out && mkdir -p out/gen/io/freemytv out/classes
 cat > out/gen/io/freemytv/Config.java <<EOF
@@ -51,15 +65,19 @@ final class Config {
 
     static final String TMDB_KEY = "$(prop tmdb_key '')";
     static final String STREMIO_KEY = "$(prop stremio_key '')";
-    static final String TMDB_REGION = "$(prop tmdb_region US)";
+    static final String WATCHMODE_KEY = "$(prop watchmode_key '')";
+    static final String TMDB_REGION = "$REGION";
     static final String LATITUDE = "$LAT";
     static final String LONGITUDE = "$LON";
     static final String CITY = "$(prop city '')";
     static final String LANGUAGE = "$(prop language auto)";
-    static final String CURRENCY = "$(prop currency USD)";
+    static final String CURRENCY = "$CURRENCY";
     static final String TEMPERATURE = "$(prop temperature auto)";
+    static final String HIDE_SERVICES = "$(prop hide_services '')";
+    static final String THEME = "$(prop theme auto)";
     static final boolean DISABLE_ASSISTANT = $ASSIST;
     static final boolean SHOW_CRYPTO = $CRYPTO;
+    static final boolean HIDE_ANIMATION = $ANIMATION;
 }
 EOF
 
@@ -67,17 +85,69 @@ EOF
 "$BT/aapt2" compile --dir app/res -o out/res.zip
 # Fonts uncompressed: Android reads them straight from the APK.
 "$BT/aapt2" link -o out/base.apk -I "$AJ" --manifest app/AndroidManifest.xml --java out/gen out/res.zip \
-  --min-sdk-version 28 --target-sdk-version 33 -A app/assets -0 ttf
-"$JAVAC" -nowarn -Xlint:-options -source 8 -target 8 -bootclasspath "$AJ:$BT/core-lambda-stubs.jar" -classpath "$AJ" \
-  -d out/classes $(find app/src out/gen -name '*.java')
-"$BT/d8" --release --min-api 28 --lib "$AJ" --output out $(find out/classes -name '*.class')
-(cd out && zip -qj base.apk classes.dex)
+  --min-sdk-version 26 --target-sdk-version 33 -A app/assets -0 ttf
+# Windows aapt2 packs assets with backslash separators ("assets/symbols\x.png") and Android
+# cannot find them: the home screen loses its icons and fonts. Rename the zip entries to "/".
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    cat > out/FixAssets.java <<'EOF'
+import java.nio.file.*;
+import java.util.zip.*;
+
+class FixAssets {
+    public static void main(String[] args) throws Exception {
+        Path apk = Paths.get(args[0]);
+        Path tmp = apk.resolveSibling(apk.getFileName() + ".fixed");
+        int renamed = 0;
+        try (ZipInputStream in = new ZipInputStream(Files.newInputStream(apk));
+             ZipOutputStream out = new ZipOutputStream(Files.newOutputStream(tmp))) {
+            for (ZipEntry e; (e = in.getNextEntry()) != null; ) {
+                byte[] data = in.readAllBytes();
+                String name = e.getName().replace('\\', '/');
+                if (!name.equals(e.getName())) renamed++;
+                ZipEntry n = new ZipEntry(name);
+                if (e.getMethod() == ZipEntry.STORED) { // Android reads fonts straight from the APK
+                    n.setMethod(ZipEntry.STORED);
+                    n.setSize(data.length);
+                    n.setCompressedSize(data.length);
+                    CRC32 crc = new CRC32();
+                    crc.update(data);
+                    n.setCrc(crc.getValue());
+                }
+                out.putNextEntry(n);
+                out.write(data);
+                out.closeEntry();
+            }
+        }
+        if (renamed > 0) Files.move(tmp, apk, StandardCopyOption.REPLACE_EXISTING);
+        else Files.delete(tmp);
+        System.out.println("FixAssets: renamed " + renamed + " asset paths in " + apk.getFileName());
+    }
+}
+EOF
+    "${JAVA_HOME:+$JAVA_HOME/bin/}java" out/FixAssets.java out/base.apk
+    ;;
+esac
+# On Windows javac separates paths with ";", and d8 and apksigner are .bat files.
+CPSEP=:; BAT=; case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) CPSEP=";"; BAT=.bat ;; esac
+"$JAVAC" -nowarn -Xlint:-options -source 8 -target 8 -bootclasspath "$AJ$CPSEP$BT/core-lambda-stubs.jar" -classpath "$AJ" \
+  -encoding UTF-8 -d out/classes $(find app/src out/gen -name '*.java')
+"$BT/d8$BAT" --release --min-api 26 --lib "$AJ" --output out $(find out/classes -name '*.class')
+if command -v zip >/dev/null; then (cd out && zip -qj base.apk classes.dex)
+else "${JAVA_HOME:+$JAVA_HOME/bin/}jar" -u -M -f out/base.apk -C out classes.dex; fi # Git Bash has no zip
 "$BT/zipalign" -f -p 4 out/base.apk out/aligned.apk
 
-# --- Sign with your own key (created once; updates need the same key, so keep freemytv.keystore)
-if [ ! -f freemytv.keystore ]; then
-  "$KEYTOOL" -genkeypair -keystore freemytv.keystore -alias freemytv -keyalg RSA -keysize 2048 -validity 20000 \
-    -storepass freemytv -keypass freemytv -dname "CN=Free My TV" >/dev/null 2>&1
+# --- Sign with your own key (created once; updates need the same key, so keep freemytv.keystore).
+# Releases sign with the project's key instead: FREEMYTV_KEYSTORE=<its file>, its password in FREEMYTV_KEYSTORE_PASS.
+if [ -n "${FREEMYTV_KEYSTORE:-}" ]; then
+  [ -n "${FREEMYTV_KEYSTORE_PASS:-}" ] || { echo "FREEMYTV_KEYSTORE_PASS is empty"; exit 1; }
+  "$BT/apksigner$BAT" sign --ks "$FREEMYTV_KEYSTORE" --ks-pass env:FREEMYTV_KEYSTORE_PASS --key-pass env:FREEMYTV_KEYSTORE_PASS \
+    --out FreeMyTV.apk out/aligned.apk
+else
+  if [ ! -f freemytv.keystore ]; then
+    "$KEYTOOL" -genkeypair -keystore freemytv.keystore -alias freemytv -keyalg RSA -keysize 2048 -validity 20000 \
+      -storepass freemytv -keypass freemytv -dname "CN=Free My TV" >/dev/null 2>&1
+  fi
+  "$BT/apksigner$BAT" sign --ks freemytv.keystore --ks-pass pass:freemytv --key-pass pass:freemytv --out FreeMyTV.apk out/aligned.apk
 fi
-"$BT/apksigner" sign --ks freemytv.keystore --ks-pass pass:freemytv --key-pass pass:freemytv --out FreeMyTV.apk out/aligned.apk
 echo "Built FreeMyTV.apk ($(du -h FreeMyTV.apk | cut -f1)). Install: adb install -r FreeMyTV.apk"

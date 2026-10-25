@@ -24,16 +24,18 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
  * Home screen picks ("This morning / afternoon / tonight"): what's trending this week plus recent releases, only from
- * the streaming apps installed on the TV (Netflix, Prime Video, Disney+, Max, Apple TV, Hulu, Paramount+, Peacock,
+ * the streaming apps installed on the TV (Netflix, Prime Video, Disney+, Max, Apple TV, Okko, Hulu, Paramount+, Peacock,
  * Globoplay...), via TMDB (an open movie database that knows what streams where in each country). Three per hour.
  * "Watch" opens the service's app.
  *
@@ -44,34 +46,53 @@ final class Recs {
         int id;
         String kind;            // "movie" or "tv"
         String title, backdrop, meta = "", app, pkg;
-        String imdb;            // "tt0111161": the title in Stremio
+        String link;            // opens the title in its app (looked up with Watchmode), or null: the app's home
+        String imdb;            // "tt0111161": the title in Stremio (held OK)
         String resume;          // "tt0944947/tt0944947:2:5": where it stopped in Stremio (the Continue tab), or null
         boolean detailed;
+        java.io.File photo;     // one of your own photos (Photos): no title, no caption
     }
 
     interface Listener { void onRecs(); }
 
     private static final String API = "https://api.themoviedb.org/3";
-    private static final String IMAGES = "https://image.tmdb.org/t/p/original";
+    /** The backdrops: on a 720p UI, TMDB's 1280-wide copy shows the same and is lighter to download and decode. */
+    private static final String IMAGES = "https://image.tmdb.org/t/p/" + (Backdrop.W <= 1280 ? "w1280" : "original");
+    /** TMDB's Animation genre (movies and shows: cartoons and anime), left out with hide_animation=true. */
+    private static final int ANIMATION = 16;
     private static final long LIST_EVERY = 6 * 3600_000L;
     /** Bump when what is saved for each title changes (the saved list is discarded and fetched again). */
-    private static final int CACHE_VERSION = 4;
+    private static final int CACHE_VERSION = 5;
     private static final int MANHA = 0, TARDE = 1, NOITE = 2;
-    static final String[] PERIOD_LABEL = {"PARA ESTA MANHÃ", "PARA ESTA TARDE", "PARA ESTA NOITE"};
-    static final String[] PERIOD_LABEL_EN = {"THIS MORNING", "THIS AFTERNOON", "TONIGHT"};
-    static final String[] PERIOD_LABEL_ES = {"PARA ESTA MAÑANA", "PARA ESTA TARDE", "PARA ESTA NOCHE"};
     /** Service name on TMDB (part of the name, lowercase) → TV app (HomeApps key, package). */
     private static final String[][] SERVICES = {
         {"netflix", "netflix", "com.netflix.ninja"},
         {"prime video", "prime", "com.amazon.amazonvideo.livingroom"},
+        {"prime video", "prime", "com.amazon.firebat"},
+        {"prime video", "prime", "com.amazon.avod"},
         {"disney", "disney", "com.disney.disneyplus"},
         {"hulu", "hulu", "com.hulu.livingroomplus"},
+        {"hulu", "hulu", "com.hulu.plus"},
         {"paramount", "paramount", "com.cbs.ott"},
+        {"paramount", "paramount", "com.cbs.ca"},      // Paramount+ outside the US (a Sony in the UK; Canada)
         {"peacock", "peacock", "com.peacocktv.peacockandroid"},
+        {"peacock", "peacock", "com.peacock.peacockfiretv"},
         {"globoplay", "globoplay", "com.globo.globotv"},
         {"max", "max", "com.wbd.stream"},
+        {"max", "max", "com.hbo.hbonow"},
         {"apple tv", "appletv", "com.apple.atve.androidtv.appletv"},
+        {"apple tv", "appletv", "com.apple.atve.sony.appletv"},   // Sony's own build
+        {"apple tv", "appletv", "com.apple.atve.amazon.appletv"},
+        {"hotstar", "hotstar", "in.startv.hotstar"},   // TMDB: "JioHotstar" (earlier "Disney Plus Hotstar")
         {"crunchyroll", "crunchyroll", "com.crunchyroll.crunchyroid"},
+        {"now tv", "now", "com.bskyb.nowtv.beta"},     // UK: Sky's NOW (TMDB: "Now TV", "Now TV Cinema")
+        {"oneplay", "oneplay", "net.cme.voyo.cz.tvapp"},    // Czechia: Voyo and O2 TV became Oneplay, same app
+        // Russia (TMDB's watch providers for RU)
+        {"okko", "okko", "ru.more.play"},
+        {"kinopoisk", "kinopoisk", "ru.kinopoisk.tv"},
+        {"premier", "premier", "gpm.tnt_premier"},
+        {"amediateka", "amediateka", "ru.amediateka"},
+        {"more tv", "wink", "ru.rt.video.app.tv"},   // TMDB: "More TV" (more.tv is part of Rostelecom's Wink now)
     };
     private static final Map<String, String> SERVICE_NAME = new HashMap<>();
     static {
@@ -84,10 +105,21 @@ final class Recs {
         SERVICE_NAME.put("globoplay", "Globoplay");
         SERVICE_NAME.put("max", "Max");
         SERVICE_NAME.put("appletv", "Apple TV");
+        SERVICE_NAME.put("hotstar", "JioHotstar");
+        SERVICE_NAME.put("okko", "Okko");
         SERVICE_NAME.put("crunchyroll", "Crunchyroll");
+        SERVICE_NAME.put("now", "NOW");
+        SERVICE_NAME.put("oneplay", "Oneplay");
+        SERVICE_NAME.put("kinopoisk", "Кинопоиск");
+        SERVICE_NAME.put("premier", "Premier");
+        SERVICE_NAME.put("amediateka", "Амедиатека");
+        SERVICE_NAME.put("wink", "Wink");
     }
     /** Country for "what streams where" (config.properties "tmdb_region", e.g. US, GB, BR). */
-    private static final String REGION = Config.TMDB_REGION.trim().toUpperCase(Locale.ROOT);
+    static final String REGION = Place.region();
+    /** The errors the settings say in words: TMDB lists none of the TV's apps in REGION, or the TV has none we know. */
+    static final String NO_APPS = "none of the TV's streaming services are on TMDB";
+    static final String NO_KNOWN_APPS = "none of the TV's streaming apps can give picks";
 
     private static Recs instance;
 
@@ -101,22 +133,16 @@ final class Recs {
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final List<Listener> listeners = new ArrayList<>();
-    private final Map<String, Backdrop> images = new LinkedHashMap<>(16, 0.75f, true);
+    private final Map<String, Backdrop> images = new LinkedHashMap<>();   // this hour's, built and ready to draw
     private final java.util.Set<String> pending = new java.util.HashSet<>();
-    private final Map<String, Long> imageFailures = new HashMap<>();
     private volatile List<Pick> picks = new ArrayList<>();
     private volatile int period = -1;
     private volatile long listAt;
     private volatile boolean fetching;
     private volatile String error = "";
     private volatile boolean light;     // light design: builds only the cards (all three tabs' cards fit in memory)
-    private volatile long failedAt, keyStamp;
+    private volatile long failedAt, keyStamp, linkRetryAt;
     private volatile String listLanguage = "";   // language used for the saved titles, genres and texts
-    private volatile boolean loadingMore;
-    private volatile long moreFailedAt;
-    private volatile String moreError = "";
-    private final int[] nextPage = {1, 1};
-    private final boolean[] more = {true, true};
 
     private Recs(Context c) {
         context = c;
@@ -129,10 +155,6 @@ final class Recs {
             listAt = cache.getLong("listAt", 0);
             listLanguage = cache.getString("language", cache.getBoolean("english", false) ? "en" : "pt");
             keyStamp = cache.getLong("keyStamp", 0);
-            for (int i = 0; i < 2; i++) {
-                nextPage[i] = cache.getInt("nextPage" + i, 1);
-                more[i] = cache.getBoolean("more" + i, true);
-            }
         } catch (Exception ignored) {
         }
     }
@@ -166,7 +188,8 @@ final class Recs {
     String error() { return error; }
 
     static String periodLabel() {
-        return (Ui.es ? PERIOD_LABEL_ES : Ui.en ? PERIOD_LABEL_EN : PERIOD_LABEL)[period(System.currentTimeMillis())];
+        int p = period(System.currentTimeMillis());
+        return p == MANHA ? Ui.tr("THIS MORNING") : p == TARDE ? Ui.tr("THIS AFTERNOON") : Ui.tr("TONIGHT");
     }
 
     private static int period(long now) {
@@ -183,22 +206,10 @@ final class Recs {
 
     /** This hour's 3, movies only ("movie") or shows only ("tv"); null = both (the home screen tabs). */
     List<Pick> now(String kind) {
-        List<Pick> list = catalog(kind);
-        if (list.isEmpty()) return list;
-        long hour = System.currentTimeMillis() / 3600_000L;
-        // Three per hour for the screensaver, never two from the same franchise.
-        List<Pick> out = new ArrayList<>();
-        java.util.Set<String> seen = new java.util.HashSet<>();
-        for (int i = 0; i < list.size() && out.size() < 3; i++) {
-            Pick p = list.get((int) ((hour * 3 + i) % list.size()));
-            if (seen.add(franchise(p.title))) out.add(p);
+        if ("stremio".equals(kind)) {
+            List<Pick> r = resume();
+            return r.size() > 3 ? r.subList(0, 3) : r;
         }
-        return out;
-    }
-
-    /** The browsable list stays in order while the user moves through it. */
-    List<Pick> catalog(String kind) {
-        if ("stremio".equals(kind)) return resume();
         List<Pick> list = new ArrayList<>();
         if (!hasKey(context)) return list;    // no TMDB key: no recommendations
         Map<String, Boolean> have = new HashMap<>();   // one look per app, not per title (this runs every 15 s)
@@ -206,65 +217,16 @@ final class Recs {
             if ((kind == null || kind.equals(p.kind))
                     && (!p.detailed || (p.pkg != null && have.computeIfAbsent(p.pkg, this::installed)))) list.add(p);   // app missing: skip
         }
-        return list;
-    }
-
-    boolean loadingMore() { return loadingMore; }
-    String moreError() { return moreError; }
-
-    /** More popular titles on the TV's services, fetched before the focused card reaches the end. */
-    void loadMore(String kind) {
-        if ("stremio".equals(kind) || !hasKey(context) || fetching || loadingMore) return;
-        long since = System.currentTimeMillis() - moreFailedAt;
-        if (moreFailedAt != 0 && since >= 0 && since < 30_000) return;
-        if (!(kind == null ? more[0] || more[1] : more["movie".equals(kind) ? 0 : 1])) return;
-        loadingMore = true;
-        moreError = "";
-        notifyListeners();
-        io.execute(() -> {
-            try {
-                String common = discoverOptions();
-                for (int i = 0; i < 2; i++) {
-                    String type = i == 0 ? "movie" : "tv";
-                    if (!more[i] || (kind != null && !kind.equals(type))) continue;
-                    JSONObject page = get("/discover/" + type + "?vote_count.gte=" + (i == 0 ? 30 : 20)
-                            + common + "&page=" + nextPage[i]);
-                    List<Pick> list = new ArrayList<>(picks);
-                    java.util.Set<String> seen = new java.util.HashSet<>();
-                    for (Pick pick : list) seen.add(key(pick));
-                    JSONArray results = page.getJSONArray("results");
-                    List<Pick> added = new ArrayList<>();
-                    for (int j = 0; j < results.length(); j++) add(added, results.getJSONObject(j), type);
-                    for (Pick pick : added) if (seen.add(key(pick))) list.add(pick);
-                    picks = list;
-                    more[i] = nextPage[i] < Math.min(500, page.optInt("total_pages", 1));
-                    nextPage[i]++;
-                }
-                moreFailedAt = 0;
-                save();
-            } catch (Exception e) {
-                moreError = "connection";
-                moreFailedAt = System.currentTimeMillis();
-                AppLog.w("more recommendations: " + e.getMessage());
-            } finally {
-                loadingMore = false;
-                notifyListeners();
-            }
-        });
-    }
-
-    private String discoverOptions() throws Exception {
-        JSONArray providers = get("/watch/providers/movie?language=" + lang() + "&watch_region=" + REGION).getJSONArray("results");
-        StringBuilder ids = new StringBuilder();
-        for (int i = 0; i < providers.length(); i++) {
-            JSONObject provider = providers.getJSONObject(i);
-            String[] s = service(provider.optString("provider_name"));
-            if (s != null && installed(s[2])) ids.append(ids.length() == 0 ? "" : "|").append(provider.getInt("provider_id"));
+        if (list.isEmpty()) return list;
+        long hour = System.currentTimeMillis() / 3600_000L;
+        // Three per hour, never two from the same franchise ("Law & Order" and "Law & Order: Special…").
+        List<Pick> out = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        for (int i = 0; i < list.size() && out.size() < 3; i++) {
+            Pick p = list.get((int) ((hour * 3 + i) % list.size()));
+            if (seen.add(franchise(p.title))) out.add(p);
         }
-        if (ids.length() == 0) throw new IOException("none of the TV's streaming services are on TMDB");
-        return "&language=" + lang() + "&watch_region=" + REGION
-                + "&with_watch_monetization_types=flatrate&include_adult=false&sort_by=popularity.desc&with_watch_providers="
-                + URLEncoder.encode(ids.toString(), "UTF-8");
+        return out;
     }
 
     // MARK: - Continue (Stremio)
@@ -301,7 +263,7 @@ final class Recs {
                 c.setReadTimeout(15000);
                 c.setDoOutput(true);
                 c.setRequestProperty("Content-Type", "application/json");
-                try (java.io.OutputStream out = c.getOutputStream()) { out.write(body.toString().getBytes("UTF-8")); }
+                try (java.io.OutputStream out = c.getOutputStream()) { out.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
                 answer = new JSONObject(read(c.getInputStream()));
             } finally {
                 c.disconnect();
@@ -330,9 +292,16 @@ final class Recs {
                 if (p == null) p = resumePick(o, id, video);
                 long left = (st.optLong("duration") - st.optLong("timeOffset")) / 60_000;
                 String[] ep = video.split(":");
-                String where = ep.length == 3 ? Ui.tr("T" + ep[1] + " E" + ep[2], "S" + ep[1] + " E" + ep[2], "T" + ep[1] + " E" + ep[2]) + " · " : "";
-                p.meta = where + (left > 0 ? Ui.tr("faltam " + left + " min", left + " min left", "quedan " + left + " min") + " · " : "") + "Stremio";
+                String where = ep.length == 3 ? Ui.trf("S{s} E{e}", "s", ep[1], "e", ep[2]) + " · " : "";
+                p.meta = where + (left > 0 ? Ui.trf("{n} min left", "n", left) + " · " : "") + "Stremio";
                 list.add(p);
+            }
+            for (Pick p : list.subList(0, Math.min(3, list.size()))) {   // the cards' photos (the picks' own loop skips these)
+                try {
+                    if (p.backdrop != null && !hasImage(p)) download(p);
+                } catch (Exception e) {
+                    AppLog.w("stremio continue, photo: " + e.getMessage());
+                }
             }
             resume = list;
         } catch (Exception e) {
@@ -352,7 +321,6 @@ final class Recs {
         p.id = id.hashCode();
         p.resume = id + "/" + video;
         p.imdb = id.startsWith("tt") ? id : null;
-        p.app = null;
         p.pkg = "com.stremio.one";
         p.detailed = true;
         if (p.imdb != null && hasKey(context)) {
@@ -393,22 +361,11 @@ final class Recs {
         synchronized (images) {
             Backdrop b = images.get(key);
             if (b != null) return b;
-            Long failed = imageFailures.get(key);
-            long since = failed == null ? Long.MAX_VALUE : System.currentTimeMillis() - failed;
-            if (since >= 0 && since < 30_000) return null;
             if (!pending.add(key)) return null;
         }
         io.execute(() -> {
             try {
-                if (!p.detailed) {
-                    fetchDetails(p);
-                    save();
-                }
-                if (p.pkg != null) loadImage(p);
-                else notifyListeners();
-            } catch (Exception e) {
-                synchronized (images) { imageFailures.put(key, System.currentTimeMillis()); }
-                AppLog.w("recommendation details: " + e.getMessage());
+                loadImage(p);
             } finally {
                 synchronized (images) { pending.remove(key); }
             }
@@ -426,9 +383,9 @@ final class Recs {
 
     /** With a key: fetches the list if stale or the time of day (morning/afternoon/night) changed; then the details. */
     void refreshIfStale() {
-        if (!hasKey(context) || fetching || loadingMore) return;
+        if (!hasKey(context) || fetching) return;
         long now = System.currentTimeMillis();
-        long stamp = sourceStamp();   // a new key, country or installed streaming-app set refetches
+        long stamp = sourceStamp();   // a new key, country, animation choice or installed streaming-app set refetches
         boolean newKey = stamp != keyStamp;
         long sinceFail = now - failedAt;    // negative = the clock went back: don't wait
         if (!newKey && failedAt != 0 && sinceFail >= 0 && sinceFail < 10 * 60_000L) return;
@@ -436,7 +393,7 @@ final class Recs {
         boolean stale = newKey || p != period || now - listAt > LIST_EVERY || now < listAt || picks.isEmpty()
                 || !listLanguage.equals(Ui.language);
         boolean missing = false;
-        for (Pick pick : wanted()) missing |= !pick.detailed || !hasImage(pick);
+        for (Pick pick : wanted()) missing |= !pick.detailed || !hasImage(pick) || needsLink(pick);
         if (!stale && !missing) return;
         keyStamp = stamp;
         fetching = true;
@@ -455,6 +412,7 @@ final class Recs {
                         failures++;
                         last = e.getMessage() == null ? e.toString() : e.getMessage();
                     }
+                    findLink(pick);
                 }
                 save();
                 if (tried > 0 && failures == tried) throw new IOException(last);
@@ -508,16 +466,11 @@ final class Recs {
      * time in the background, so it has more photos. Not used otherwise.
      */
     void prefetchAll() {
-        if (!hasKey(context) || fetching || loadingMore) return;
+        if (!hasKey(context) || fetching) return;
         long sinceFail = System.currentTimeMillis() - failedAt;
         if (failedAt != 0 && sinceFail >= 0 && sinceFail < 10 * 60_000L) return;
-        // Only the first 24: with the endless row the list grows past what prune keeps, and the screensaver would
-        // download and delete the same photos every minute.
         List<Pick> todo = new ArrayList<>();
-        List<Pick> all = picks;
-        for (Pick p : all.subList(0, Math.min(24, all.size()))) {
-            if (!p.detailed || (p.pkg != null && !hasImage(p))) todo.add(p);
-        }
+        for (Pick p : picks) if (!p.detailed || (p.pkg != null && !hasImage(p))) todo.add(p);
         if (todo.isEmpty()) return;
         fetching = true;
         io.execute(() -> {
@@ -569,19 +522,24 @@ final class Recs {
     // MARK: - TMDB
 
     private void fetchList(int p) throws Exception {
+        // None of the services we know is on the TV (or hide_services hides them all): no region would change that.
+        boolean any = false;
+        for (String[] s : SERVICES) any |= installed(s[2]);
+        if (!any) throw new IOException(NO_KNOWN_APPS);
         // The services the TV has, by their TMDB ids in your region.
         Map<Integer, String[]> services = new HashMap<>();
         JSONArray providers = get("/watch/providers/movie?language=" + lang() + "&watch_region=" + REGION).getJSONArray("results");
         for (int i = 0; i < providers.length(); i++) {
             JSONObject o = providers.getJSONObject(i);
-            String[] s = service(o.optString("provider_name"));
+            String[] s = service(o.optString("provider_name"), o.optInt("provider_id"));
             if (s != null && installed(s[2])) services.put(o.getInt("provider_id"), s);
         }
-        if (services.isEmpty()) throw new IOException("none of the TV's streaming services are on TMDB");
+        if (services.isEmpty()) throw new IOException(NO_APPS);
         StringBuilder ids = new StringBuilder();
         for (int id : services.keySet()) ids.append(ids.length() == 0 ? "" : "|").append(id);
         String common = "&language=" + lang() + "&watch_region=" + REGION + "&with_watch_monetization_types=flatrate&include_adult=false"
-                + "&sort_by=popularity.desc&with_watch_providers=" + URLEncoder.encode(ids.toString(), "UTF-8");
+                + "&sort_by=popularity.desc&with_watch_providers=" + URLEncoder.encode(ids.toString(), "UTF-8")
+                + (Config.HIDE_ANIMATION ? "&without_genres=" + ANIMATION : "");
         // 1. Trending this week (TMDB goes by what people are watching and searching for right now), only what is
         //    on one of the TV's services: the details say where (and are then ready).
         List<Pick> hotMovies = new ArrayList<>(), hotShows = new ArrayList<>();
@@ -607,25 +565,27 @@ final class Recs {
         List<Pick> newMovies = new ArrayList<>(), newShows = new ArrayList<>();
         for (int i = 0; i < movies.length(); i++) add(newMovies, movies.getJSONObject(i), "movie");
         for (int i = 0; i < shows.length(); i++) add(newShows, shows.getJSONObject(i), "tv");
-        // Trending first, then the new releases; movies and shows alternating, without repeats.
+        // Trending first, then the new releases; movies and shows alternating, without repeats, up to 24.
         List<Pick> list = new ArrayList<>();
         java.util.Set<String> seen = new java.util.HashSet<>();
-        alternate(list, seen, hotMovies, hotShows, 80);
-        alternate(list, seen, newMovies, newShows, 80);
+        alternate(list, seen, hotMovies, hotShows, 24);
+        alternate(list, seen, newMovies, newShows, 24);
         if (list.isEmpty()) throw new IOException("TMDB returned no recommendations");
         picks = list;
         period = p;
         listAt = System.currentTimeMillis();
         listLanguage = Ui.language;
-        for (int i = 0; i < 2; i++) { nextPage[i] = 1; more[i] = true; }
-        moreFailedAt = 0;
-        moreError = "";
     }
 
-    /** Language of titles and genres; the services come from the region. */
+    /** Language of titles and genres (TMDB's "fr-FR", "zh-CN"…); the services come from the region. */
     private static String lang() {
-        if (Ui.es) return "ES".equals(java.util.Locale.getDefault().getCountry()) ? "es-ES" : "es-MX";
-        return Ui.en ? "en-US" : "pt-BR";
+        String lang = Ui.language;
+        if (lang.equals("en")) return "en-US";
+        if (lang.equals("pt")) return "pt-BR";
+        if (lang.equals("es")) return "ES".equals(java.util.Locale.getDefault().getCountry()) ? "es-ES" : "es-MX";
+        if (lang.equals("de")) return "de-DE";   // TMDB's de-AT and de-CH have few translations of their own
+        if (lang.indexOf('-') > 0) return lang;
+        return lang + "-" + Ui.locale().getCountry();
     }
 
     private static void alternate(List<Pick> out, java.util.Set<String> seen, List<Pick> a, List<Pick> b, int max) {
@@ -645,6 +605,7 @@ final class Recs {
     private static void add(List<Pick> list, JSONObject o, String kind) {
         String backdrop = o.optString("backdrop_path", "");
         if (backdrop.isEmpty() || "null".equals(backdrop)) return;
+        if (Config.HIDE_ANIMATION && animated(o)) return;
         Pick p = new Pick();
         p.id = o.optInt("id");
         p.kind = kind;
@@ -653,33 +614,38 @@ final class Recs {
         list.add(p);
     }
 
+    private static boolean animated(JSONObject o) {
+        JSONArray genres = o.optJSONArray("genre_ids");
+        for (int i = 0; genres != null && i < genres.length(); i++) if (genres.optInt(i) == ANIMATION) return true;
+        return false;
+    }
+
     /** Genre, runtime (or seasons) and the service it's on, among the ones the TV has. */
     private void fetchDetails(Pick p) throws Exception {
         JSONObject o = get("/" + p.kind + "/" + p.id
-                + "?language=" + lang() + "&append_to_response=watch/providers,images,external_ids&include_image_language=null," + Ui.language + ",en");
+                + "?language=" + lang() + "&append_to_response=watch/providers,images,external_ids&include_image_language=null," + Ui.language.replaceAll("-.*", "") + ",en");
+        p.title = title(p, o);
         String best = bestBackdrop(o.optJSONObject("images"));
         if (best != null) p.backdrop = best;
         List<String> parts = new ArrayList<>();
         JSONArray genres = o.optJSONArray("genres");
-        if (p.kind.equals("tv")) parts.add(Ui.tr("Série", "Series"));
+        if (p.kind.equals("tv")) parts.add(Ui.tr("Series"));
         if (genres != null && genres.length() > 0) {
             String name = genres.getJSONObject(0).optString("name");
-            parts.add(Ui.en ? name : genre(name));
+            parts.add(genre(name));
         }
         if (p.kind.equals("movie")) {
             int minutes = o.optInt("runtime");
-            if (minutes > 0 && Ui.en) parts.add(minutes >= 60 ? (minutes / 60) + "h " + (minutes % 60) + "m" : minutes + "m");
-            else if (minutes > 0) parts.add(minutes >= 60 ? (minutes / 60) + " h " + (minutes % 60) + " min" : minutes + " min");
+            if (minutes > 0) parts.add(minutes >= 60 ? Ui.trf("{h}h {m}m", "h", minutes / 60, "m", minutes % 60) : Ui.trf("{m}m", "m", minutes));
         } else {
             int seasons = o.optInt("number_of_seasons");
-            if (seasons > 0 && Ui.en) parts.add(seasons == 1 ? "1 season" : seasons + " seasons");
-            else if (seasons > 0) parts.add(seasons == 1 ? "1 temporada" : seasons + " temporadas");
+            if (seasons > 0) parts.add(Ui.plural("plural|one:{n} season|other:{n} seasons", seasons));
         }
         JSONObject wp = o.optJSONObject("watch/providers");
         JSONObject br = wp == null ? null : wp.optJSONObject("results") == null ? null : wp.optJSONObject("results").optJSONObject(REGION);
         JSONArray flat = br == null ? null : br.optJSONArray("flatrate");
         for (int i = 0; flat != null && i < flat.length() && p.app == null; i++) {
-            String[] s = service(flat.getJSONObject(i).optString("provider_name"));
+            String[] s = service(flat.getJSONObject(i).optString("provider_name"), flat.getJSONObject(i).optInt("provider_id"));
             if (s != null && installed(s[2])) {
                 p.app = s[1];
                 p.pkg = s[2];
@@ -689,26 +655,42 @@ final class Recs {
         JSONObject ids = o.optJSONObject("external_ids");
         String imdb = ids == null ? "" : ids.optString("imdb_id", "");
         p.imdb = imdb.startsWith("tt") ? imdb : null;
-        if (p.imdb != null && installed("com.stremio.one")) parts.add(Ui.tr("Segure OK: Stremio", "Hold OK: Stremio", "Mantén OK: Stremio"));
+        if (p.imdb != null && installed("com.stremio.one")) parts.add(Ui.tr("Hold OK: Stremio"));
         p.meta = String.join(" · ", parts);
         p.detailed = true;
     }
 
-    /** TV genres that TMDB returns in English even in pt-BR. */
-    private static final String[][] GENRES_PT = {
-        {"Action & Adventure", "Ação e Aventura"}, {"Sci-Fi & Fantasy", "Ficção Científica e Fantasia"},
-        {"War & Politics", "Guerra e Política"}, {"Kids", "Infantil"}, {"News", "Notícias"}, {"Soap", "Novela"},
-        {"Talk", "Entrevistas"},
-    };
-    private static final String[][] GENRES_ES = {
-        {"Action & Adventure", "Acción y Aventura"}, {"Sci-Fi & Fantasy", "Ciencia ficción y Fantasía"},
-        {"War & Politics", "Guerra y Política"}, {"Kids", "Infantil"}, {"News", "Noticias"},
-        {"Soap", "Telenovela"}, {"Talk", "Entrevistas"},
-    };
+    /**
+     * Without a title in the TV's language TMDB answers with the original one, so a Korean series on a German TV reads
+     * "닥터X: 하얀 마피아의 시대". Then the English title, when TMDB has one (one more request, only for those).
+     */
+    private String title(Pick p, JSONObject o) {
+        String field = p.kind.equals("movie") ? "title" : "name";
+        String own = o.optString(field, p.title);
+        String original = o.optString("original_language");
+        String lang = Ui.language.replaceAll("-.*", "");   // TMDB's original_language has no country: "zh", not "zh-CN"
+        if (lang.equals("en") || own.isEmpty() || !own.equals(o.optString("original_" + field))
+                || lang.equals(original) || "en".equals(original)) return own;
+        try {
+            String english = get("/" + p.kind + "/" + p.id + "?language=en-US").optString(field);
+            return english.isEmpty() ? own : english;
+        } catch (Exception e) {
+            return own;
+        }
+    }
 
+    /** TV genres that TMDB returns in English even in other languages (pt-BR, es, de…). */
     private static String genre(String name) {
-        for (String[] g : Ui.es ? GENRES_ES : GENRES_PT) if (g[0].equalsIgnoreCase(name)) return g[1];
-        return name;
+        switch (name) {
+            case "Action & Adventure": return Ui.tr("genre|Action & Adventure");
+            case "Sci-Fi & Fantasy": return Ui.tr("genre|Sci-Fi & Fantasy");
+            case "War & Politics": return Ui.tr("genre|War & Politics");
+            case "Kids": return Ui.tr("genre|Kids");
+            case "News": return Ui.tr("genre|News");
+            case "Soap": return Ui.tr("genre|Soap");
+            case "Talk": return Ui.tr("genre|Talk");
+            default: return name;
+        }
     }
 
     /**
@@ -733,22 +715,108 @@ final class Recs {
         return best;
     }
 
-    private static String[] service(String name) {
+    /** The SERVICES row for a TMDB name: the installed one first, when a service has more than one package. */
+    private String[] service(String name, int providerId) {
         String n = name.toLowerCase(Locale.ROOT);
+        String[] first = null;
+        // "HBO Max Amazon Channel", "Apple TV Amazon Channel"...: a subscription sold inside another app, not this one.
+        if (n.contains(" channel")) return null;
         for (String[] s : SERVICES) {
-            if (s[0].equals("max") ? n.matches(".*\\bmax\\b.*") : n.contains(s[0])) return s;
+            // Apple TV: only the streaming service (TMDB provider 350); provider 2 is the Apple TV Store (rent or buy).
+            if (s[1].equals("appletv") && providerId != 350) continue;
+            if (!(s[0].equals("max") ? n.matches(".*\\bmax\\b.*") : n.contains(s[0]))) continue;
+            if (installed(s[2])) return s;
+            if (first == null) first = s;
         }
-        return null;
+        return first;
     }
 
+    /** Services named in hide_services (config.properties), trimmed and lowercased: never a source of picks. */
+    private static final Set<String> HIDDEN = new HashSet<>();
+    static {
+        for (String s : Config.HIDE_SERVICES.split(",")) {
+            String key = s.trim().toLowerCase(Locale.ROOT);
+            if (!key.isEmpty()) HIDDEN.add(key);
+        }
+    }
+
+    /** The service's app is on the TV, and the service isn't hidden (an app the TV ships without a subscription, say). */
     private boolean installed(String pkg) {
+        if (!HIDDEN.isEmpty()) for (String[] s : SERVICES) if (s[2].equals(pkg) && HIDDEN.contains(s[1])) return false;
         return HomeApps.launchIntent(context.getPackageManager(), pkg) != null;
     }
 
     private long sourceStamp() {
-        long stamp = Config.TMDB_KEY.hashCode() * 31L + REGION.hashCode();
+        long stamp = (Config.TMDB_KEY.hashCode() * 31L + REGION.hashCode()) * 31L + (Config.HIDE_ANIMATION ? 1 : 0);
         for (String[] service : SERVICES) stamp = stamp * 31L + (installed(service[2]) ? service[2].hashCode() : 0);
         return stamp;
+    }
+
+    // MARK: - Watchmode (the title's own page in its app; the free plan's web addresses are what the apps open)
+
+    private static String linkKey(Pick p) {
+        return "wm:" + p.kind + p.id + p.app;
+    }
+
+    private boolean needsLink(Pick p) {
+        return linksOn() && p.pkg != null && p.link == null
+                && cache.getString(linkKey(p), null) == null && System.currentTimeMillis() >= linkRetryAt;
+    }
+
+    /** A key is set and Watchmode hasn't refused it (a refused key isn't tried again until it changes). */
+    private boolean linksOn() {
+        String key = Config.WATCHMODE_KEY.trim();
+        return !key.isEmpty() && cache.getInt("wm:refused", 0) != key.hashCode();
+    }
+
+    /** Sets p.link from what was looked up before, or looks it up (2 requests of the free plan's 2,500 a month). */
+    private void findLink(Pick p) {
+        if (!linksOn() || p.pkg == null || p.link != null) return;
+        String saved = cache.getString(linkKey(p), null);
+        if (saved != null) {
+            p.link = saved.isEmpty() ? null : saved;
+            return;
+        }
+        if (System.currentTimeMillis() < linkRetryAt) return;
+        try {
+            String link = "";
+            JSONArray found = new JSONObject(watchmode("/search/?search_field=tmdb_" + p.kind + "_id&search_value=" + p.id))
+                    .optJSONArray("title_results");
+            if (found != null && found.length() > 0) {
+                JSONArray sources = new JSONArray(watchmode("/title/" + found.getJSONObject(0).getInt("id") + "/sources/?regions=" + REGION));
+                String[] service = null;
+                for (String[] s : SERVICES) if (s[1].equals(p.app)) service = s;
+                for (int i = 0; service != null && i < sources.length() && link.isEmpty(); i++) {
+                    JSONObject s = sources.getJSONObject(i);
+                    String name = s.optString("name").toLowerCase(Locale.ROOT).replace(" ", "");
+                    String want = service[0].replace(" ", "");
+                    boolean same = want.equals("max") ? name.equals("max") : name.contains(want);
+                    if (same && s.optString("type").equals("sub") && s.optString("web_url").startsWith("https://")) link = s.optString("web_url");
+                }
+            }
+            cache.edit().putString(linkKey(p), link).apply();
+            p.link = link.isEmpty() ? null : link;
+        } catch (Exception e) {
+            if ("Watchmode returned HTTP 401".equals(e.getMessage())) {
+                cache.edit().putInt("wm:refused", Config.WATCHMODE_KEY.trim().hashCode()).apply();
+            }
+            linkRetryAt = System.currentTimeMillis() + 10 * 60_000L;   // quota or network: not again right away
+            AppLog.w("watchmode: " + e.getMessage());
+        }
+    }
+
+    private static String watchmode(String path) throws IOException {
+        HttpURLConnection c = (HttpURLConnection) new URL("https://api.watchmode.com/v1" + path + (path.contains("?") ? "&" : "?")
+                + "apiKey=" + URLEncoder.encode(Config.WATCHMODE_KEY.trim(), "UTF-8")).openConnection();
+        c.setConnectTimeout(8000);
+        c.setReadTimeout(10000);
+        try {
+            int code = c.getResponseCode();
+            if (code != 200) throw new IOException("Watchmode returned HTTP " + code);
+            return read(c.getInputStream());
+        } finally {
+            c.disconnect();
+        }
     }
 
     private JSONObject get(String path) throws IOException, org.json.JSONException {
@@ -776,7 +844,7 @@ final class Recs {
         return key.isEmpty() ? null : key;
     }
 
-    // MARK: - Images (TMDB originals on disk, up to 48: the screensaver's 24 plus browsed cards; this hour's kept ready in memory)
+    // MARK: - Images (TMDB originals on disk, up to 24 so the whole list fits; this hour's kept ready in memory)
 
     private void download(Pick p) throws IOException {
         File f = imageFile(p);
@@ -802,7 +870,7 @@ final class Recs {
         prune(f.getParentFile());
     }
 
-    /** Reads the original (≥ 1920 wide) and builds the backdrop (Backdrop: cards plus frosted and glass versions). */
+    /** Reads the photo (≥ the UI's width) and builds the backdrop (Backdrop: cards plus frosted and glass versions). */
     private void loadImage(Pick p) {
         synchronized (images) {
             if (images.containsKey(p.backdrop)) return;
@@ -818,18 +886,16 @@ final class Recs {
             while (bounds.outWidth / (opts.inSampleSize * 2) >= Backdrop.W) opts.inSampleSize *= 2;
             Bitmap b = BitmapFactory.decodeFile(f.getPath(), opts);
             if (b == null) throw new IOException("unreadable image");
-            AppLog.w("backdrop \u201c" + p.title + "\u201d: " + bounds.outWidth + "×" + bounds.outHeight);
+            AppLog.w("backdrop \u201c" + p.title + "\u201d: " + bounds.outWidth + "×" + bounds.outHeight + " → " + Backdrop.W + "×" + Backdrop.H);
             boolean forLight = light;
             Backdrop backdrop = Backdrop.make(b, forLight);
             if (forLight != light) return;   // the design changed midway: this one is stale
             synchronized (images) {
-                imageFailures.remove(p.backdrop);
                 images.put(p.backdrop, backdrop);
                 while (images.size() > (forLight ? 10 : 4)) images.remove(images.keySet().iterator().next());
             }
             notifyListeners();
         } catch (IOException | RuntimeException | OutOfMemoryError e) {
-            synchronized (images) { imageFailures.put(p.backdrop, System.currentTimeMillis()); }
             //noinspection ResultOfMethodCallIgnored
             f.delete();
             AppLog.w("recommendation image: " + e.getMessage());
@@ -837,17 +903,26 @@ final class Recs {
     }
 
     void trim() {
+        // Explore's picks stay: the home screen opens on that tab, so its cards are never gray when you come back.
+        java.util.Set<String> keep = new java.util.HashSet<>();
+        for (Pick p : now(null)) if (p.backdrop != null) keep.add(p.backdrop);
         synchronized (images) {
-            images.clear();
+            images.keySet().retainAll(keep);
         }
     }
 
     private static void prune(File dir) {
+        // A download cut off when the system stopped the app leaves its .part behind.
+        long stale = System.currentTimeMillis() - 10 * 60_000L;
+        File[] parts = dir.listFiles((d, name) -> name.endsWith(".part"));
+        for (int i = 0; parts != null && i < parts.length; i++) {
+            //noinspection ResultOfMethodCallIgnored
+            if (parts[i].lastModified() < stale) parts[i].delete();
+        }
         File[] files = dir.listFiles((d, name) -> !name.endsWith(".part"));
-        // 48: the screensaver's 24 plus room for the cards browsed further along and the Continue tab.
-        if (files == null || files.length <= 48) return;
+        if (files == null || files.length <= 24) return;
         Arrays.sort(files, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
-        for (int i = 0; i < files.length - 48; i++) {
+        for (int i = 0; i < files.length - 24; i++) {
             //noinspection ResultOfMethodCallIgnored
             files[i].delete();
         }
@@ -859,16 +934,18 @@ final class Recs {
         try {
             JSONArray a = new JSONArray();
             for (Pick p : picks) {
-                a.put(new JSONObject().put("id", p.id).put("kind", p.kind).put("title", p.title).put("backdrop", p.backdrop)
+                a.put(new JSONObject().put("id", p.id).put("kind", p.kind).put("title", p.title).put("backdrop", p.backdrop).put("link", p.link == null ? "" : p.link).put("imdb", p.imdb == null ? "" : p.imdb)
                         .put("meta", p.meta).put("app", p.app == null ? "" : p.app).put("pkg", p.pkg == null ? "" : p.pkg)
-                        .put("imdb", p.imdb == null ? "" : p.imdb)
                         .put("detailed", p.detailed));
             }
-            cache.edit().putString("picks", a.toString()).putInt("period", period).putLong("listAt", listAt)
+            SharedPreferences.Editor e = cache.edit().putString("picks", a.toString()).putInt("period", period).putLong("listAt", listAt)
                     .putString("language", listLanguage)
-                    .putInt("nextPage0", nextPage[0]).putInt("nextPage1", nextPage[1])
-                    .putBoolean("more0", more[0]).putBoolean("more1", more[1])
-                    .putLong("keyStamp", keyStamp).putInt("version", CACHE_VERSION).apply();
+                    .putLong("keyStamp", keyStamp).putInt("version", CACHE_VERSION);
+            // Watchmode links of titles no longer in the list go (the refused-key mark stays).
+            Set<String> keep = new HashSet<>();
+            for (Pick p : picks) keep.add(linkKey(p));
+            for (String k : cache.getAll().keySet()) if (k.startsWith("wm:") && !k.equals("wm:refused") && !keep.contains(k)) e.remove(k);
+            e.apply();
         } catch (Exception ignored) {
         }
     }
@@ -883,10 +960,11 @@ final class Recs {
             p.kind = o.optString("kind");
             p.title = o.optString("title");
             p.backdrop = o.optString("backdrop");
+            p.link = o.optString("link").isEmpty() ? null : o.optString("link");
             p.meta = o.optString("meta");
+            p.imdb = o.optString("imdb").isEmpty() ? null : o.optString("imdb");
             p.app = o.optString("app").isEmpty() ? null : o.optString("app");
             p.pkg = o.optString("pkg").isEmpty() ? null : o.optString("pkg");
-            p.imdb = o.optString("imdb").isEmpty() ? null : o.optString("imdb");
             p.detailed = o.optBoolean("detailed");
             out.add(p);
         }

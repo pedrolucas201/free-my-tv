@@ -7,6 +7,15 @@
 <link rel="stylesheet" href="home.css">
 </head>
 <body>
+<script>
+  // The look the home screen last had, before anything is drawn, so a night start doesn't flash the day one first.
+  try {
+    if (localStorage.getItem('fmtv.night') === 'true') {
+      document.documentElement.style.background = '#0B0B0D';
+      document.body.className = 'night';
+    }
+  } catch (e) {}
+</script>
 <div id="stage">
   <div id="sky" class="layer">
     <div class="grad day"></div>
@@ -23,7 +32,6 @@
       <div id="quotes"></div>
       <div id="buttons"></div>
       <div id="cards"></div>
-      <div id="cardProgress"></div>
       <div id="clock"><span class="time"></span><span class="date"></span></div>
     </div>
     <div id="platter"></div>
@@ -33,11 +41,13 @@
   <div id="apps" class="layer sheet"><h2></h2><div class="grid"></div></div>
   <div id="settings" class="layer sheet"><div class="box"></div></div>
   <div id="shelfedit" class="layer sheet"><div class="box"></div></div>
+  <div id="langpick" class="layer sheet"><div class="box"></div></div>
   <div id="saver" class="layer"></div>
   <div id="toast"></div>
 </div>
 <script src="config.js"></script>
 <script src="coins.js"></script>
+<script src="i18n.js"></script>
 <script src="strings.js"></script>
 <script src="tv.js"></script>
 <script src="zones.js"></script>

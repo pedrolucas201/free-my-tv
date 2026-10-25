@@ -36,6 +36,19 @@ def key_path(ip):
     return os.path.join(os.path.expanduser('~'), '.ssh', 'freemytv_webos_' + ip.replace('.', '_'))
 
 
+def lock(path):
+    """Only this user may read the key: chmod is enough on macOS and Linux, Windows' OpenSSH checks the file's ACL."""
+    os.chmod(path, 0o600)
+    if os.name != 'nt':
+        return
+    # By SID, not name: a domain PC that lost its trust with the domain can't resolve names. As bytes: whoami writes in
+    # the console's code page, which a user name with accents may not decode from.
+    out = subprocess.run(['whoami', '/user', '/fo', 'csv', '/nh'], capture_output=True).stdout
+    sid = re.search(rb'S-1-[0-9-]+', out)
+    if sid:
+        subprocess.run(['icacls', path, '/inheritance:r', '/grant:r', '*%s:F' % sid.group().decode()], capture_output=True)
+
+
 def fetch_key(ip):
     """The TV's SSH key from its Key Server, unlocked with the passphrase the TV shows."""
     path = key_path(ip)
@@ -53,13 +66,15 @@ def fetch_key(ip):
     tmp = tempfile.NamedTemporaryFile(delete=False)
     tmp.write(data)
     tmp.close()
-    os.chmod(tmp.name, 0o600)
+    lock(tmp.name)
     unlock = subprocess.run(['ssh-keygen', '-p', '-P', passphrase, '-N', '', '-f', tmp.name], capture_output=True, text=True)
     if unlock.returncode != 0:
         os.unlink(tmp.name)
-        sys.exit('That passphrase didn\'t unlock the key. Check it on the TV (Developer Mode) and try again.')
+        # ssh-keygen's last line says why: a wrong passphrase, or a key file others can read ("bad permissions").
+        reason = (unlock.stderr.strip().splitlines() or [''])[-1]
+        sys.exit('That passphrase didn\'t unlock the key (%s). Check it on the TV (Developer Mode) and try again.' % reason)
     shutil.move(tmp.name, path)
-    os.chmod(path, 0o600)
+    lock(path)
     return path
 
 
@@ -70,8 +85,14 @@ def ssh(ip, key, command, stdin=None, tty=False):
 
 def luna(ip, key, uri, payload, replies=1, wait=20):
     # luna-send-pub prints nothing without a terminal (-tt), and the installer streams several replies.
-    command = "timeout %d luna-send-pub -n %d %s '%s'" % (wait, replies, uri, json.dumps(payload, separators=(',', ':')))
-    return ssh(ip, key, command, tty=True).stdout or ''
+    # Older webOS ships BusyBox before 1.30, whose timeout only takes -t SECS.
+    # Some (webOS 6) refuse the terminal; there -i streams the replies without one, until the timeout.
+    timeout = "if timeout -t 1 true 2>/dev/null; then T='timeout -t %d'; else T='timeout %d'; fi; " % (wait, wait)
+    message = "%s '%s'" % (uri, json.dumps(payload, separators=(',', ':')))
+    out = ssh(ip, key, timeout + '$T luna-send-pub -n %d %s' % (replies, message), tty=True).stdout or ''
+    if not out.strip():
+        out = ssh(ip, key, timeout + '$T luna-send-pub -i %s </dev/null' % message).stdout or ''
+    return out
 
 
 def main():

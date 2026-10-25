@@ -13,12 +13,17 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.text.DecimalFormat;
+import java.text.DecimalFormatSymbols;
+import java.text.NumberFormat;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.SimpleTimeZone;
 import java.util.TimeZone;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -31,11 +36,18 @@ import java.util.concurrent.Executors;
 final class HomeData {
     static final String[] COINS = {"BTC", "ETH", "SOL", "USDT"};
     static final String[] COIN_NAMES = {"Bitcoin", "Ethereum", "Solana", "Dollar"};
-    private static final String CURRENCY = Config.CURRENCY.trim().toUpperCase(Locale.ROOT);
+    private static final String CURRENCY = Place.currency();
+    /** Binance has no pairs in some currencies (INR...) and then refuses the whole request: prices go in dollars instead. */
+    private static volatile boolean inDollars;
+
     /** Binance quotes dollars as USDT. */
-    private static final String QUOTE = CURRENCY.equals("USD") ? "USDT" : CURRENCY;
-    private static final String WEATHER_QUERY = "&current=temperature_2m,weather_code,is_day&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset"
-            + "&hourly=temperature_2m,weather_code,is_day&timezone=auto&forecast_days=2";
+    private static String quote() {
+        return CURRENCY.equals("USD") || inDollars ? "USDT" : CURRENCY;
+    }
+    // Both forecasts in one answer, the next 48 hours and today plus 5 days: Home Settings → Forecast switches without
+    // asking again, and offline too.
+    private static final String WEATHER_QUERY = "&current=temperature_2m,weather_code,is_day&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset,weather_code"
+            + "&hourly=temperature_2m,weather_code,is_day&timezone=auto&forecast_days=6&forecast_hours=48";
 
     private static String weatherPlace() {
         return Prefs.latitude() + "," + Prefs.longitude();
@@ -54,17 +66,21 @@ final class HomeData {
 
     private static volatile int[] activeCoins;
     private static volatile int activeVersion = -1;
+    private static volatile boolean activeInDollars;
 
     /** Indexes in COINS of the coins the user has on (and that Binance lists in this currency). */
     static int[] active() {
         int[] a = activeCoins;
-        if (a != null && activeVersion == Prefs.version) return a;
+        boolean dollars = inDollars;
+        if (a != null && activeVersion == Prefs.version && activeInDollars == dollars) return a;
         int n = 0;
         int[] tmp = new int[COINS.length];
-        for (int i = 0; i < COINS.length; i++) if (Prefs.coin(i) && (i < 3 || CURRENCY.equals("BRL"))) tmp[n++] = i;
+        // The dollar only in reais, not in dollars: USDTUSDT isn't a pair, and Binance would refuse the whole request.
+        for (int i = 0; i < COINS.length; i++) if (Prefs.coin(i) && (i < 3 || CURRENCY.equals("BRL") && !dollars)) tmp[n++] = i;
         a = java.util.Arrays.copyOf(tmp, n);
         activeCoins = a;
         activeVersion = Prefs.version;
+        activeInDollars = dollars;
         return a;
     }
 
@@ -77,14 +93,33 @@ final class HomeData {
     }
 
     static String coinName(int i) {
-        return i == 3 ? Ui.tr("Dólar", "Dollar") : COIN_NAMES[i];
+        return i == 3 ? Ui.tr("Dollar") : COIN_NAMES[i];
     }
 
-    private static String pricesUrl() {
+    /** Binance.com refuses the US (HTTP 451); Binance.US answers the same call in dollars. */
+    private static final String[] PRICE_HOSTS = {"https://api.binance.com", "https://api.binance.us"};
+
+    private static String pricesPath() {
         StringBuilder symbols = new StringBuilder();
         int[] coins = active();
-        for (int i = 0; i < coins.length; i++) symbols.append(i == 0 ? "" : ",").append("%22").append(COINS[coins[i]]).append(QUOTE).append("%22");
-        return "https://api.binance.com/api/v3/ticker/24hr?type=MINI&symbols=%5B" + symbols + "%5D";
+        for (int i = 0; i < coins.length; i++) symbols.append(i == 0 ? "" : ",").append("%22").append(COINS[coins[i]]).append(quote()).append("%22");
+        return "/api/v3/ticker/24hr?type=MINI&symbols=%5B" + symbols + "%5D";
+    }
+
+    private static String getPrices() throws IOException {
+        IOException failed = null;
+        for (String host : PRICE_HOSTS) {
+            try {
+                return get(host + pricesPath());
+            } catch (IOException e) {
+                // Binance.US has only dollar pairs: its error counts only where Binance.com refuses the US (HTTP 451).
+                // After a timeout or a 5xx there, its HTTP 400 would put the prices in dollars for good.
+                if (failed == null || "HTTP 451".equals(failed.getMessage())) failed = e;
+                // A pair Binance doesn't list (HTTP 400) isn't a refusal: the caller falls back to dollars instead.
+                if ("HTTP 400".equals(e.getMessage())) break;
+            }
+        }
+        throw failed;
     }
 
     static final class Weather {
@@ -97,6 +132,11 @@ final class HomeData {
         final List<Double> hourTemp = new ArrayList<>();
         final List<Integer> hourCode = new ArrayList<>();
         final List<Boolean> hourDay = new ArrayList<>();
+        // The next 5 days (from tomorrow): noon of each day on the TV's clock, high, low and code.
+        final List<Long> days = new ArrayList<>();
+        final List<Double> dayMax = new ArrayList<>();
+        final List<Double> dayMin = new ArrayList<>();
+        final List<Integer> dayCode = new ArrayList<>();
     }
 
     private static HomeData instance;
@@ -118,9 +158,12 @@ final class HomeData {
     private final List<Listener> listeners = new ArrayList<>();
     private volatile boolean fetchingPrices, fetchingWeather;
     private volatile long pricesFailedAt, weatherFailedAt;
+    /** The city of the forecast in memory: another process (ScreensaverAlone) can see the city change under it. */
+    private volatile String weatherFor = "";
 
     private HomeData(Context c) {
         cache = c.getSharedPreferences("homedata", Context.MODE_PRIVATE);
+        inDollars = CURRENCY.equals(cache.getString("dollarsFor", ""));
         try {
             if (Prefs.quotes()) {
                 String p = cache.getString("prices", null);
@@ -131,7 +174,9 @@ final class HomeData {
             // The cached forecast is for the city it was fetched for; another city means fetch again.
             if (w != null && weatherPlace().equals(cache.getString("weatherPlace", ""))) {
                 weather = parseWeather(w);
-                weatherAt = cache.getLong("weatherAt", 0);
+                // Fetched with another query (an older version): shown, and fetched again now.
+                weatherAt = WEATHER_QUERY.equals(cache.getString("weatherQuery", "")) ? cache.getLong("weatherAt", 0) : 0;
+                weatherFor = weatherPlace();
             }
         } catch (Exception ignored) {}
     }
@@ -147,7 +192,16 @@ final class HomeData {
             fetchingPrices = true;
             io.execute(() -> {
                 try {
-                    String body = get(pricesUrl());
+                    String body;
+                    try {
+                        body = getPrices();
+                    } catch (IOException e) {
+                        if (inDollars || CURRENCY.equals("USD") || !"HTTP 400".equals(e.getMessage())) throw e;
+                        inDollars = true;
+                        cache.edit().putString("dollarsFor", CURRENCY).apply();
+                        AppLog.w("prices: Binance has no " + CURRENCY + " pairs, using dollars");
+                        body = getPrices();
+                    }
                     parsePrices(body);
                     pricesAt = System.currentTimeMillis();
                     cache.edit().putString("prices", body).putLong("pricesAt", pricesAt).apply();
@@ -160,14 +214,18 @@ final class HomeData {
                 }
             });
         }
-        if (!fetchingWeather && (now - weatherAt > WEATHER_EVERY || now < weatherAt) && !failedRecently(weatherFailedAt, now)) {
+        boolean moved = !weatherPlace().equals(weatherFor);
+        if (!fetchingWeather && (moved || now - weatherAt > WEATHER_EVERY || now < weatherAt) && !failedRecently(weatherFailedAt, now)) {
             fetchingWeather = true;
             io.execute(() -> {
                 try {
+                    String place = weatherPlace();
                     String body = get(weatherUrl());
                     weather = parseWeather(body);
                     weatherAt = System.currentTimeMillis();
-                    cache.edit().putString("weather", body).putLong("weatherAt", weatherAt).putString("weatherPlace", weatherPlace()).apply();
+                    weatherFor = place;
+                    cache.edit().putString("weather", body).putLong("weatherAt", weatherAt).putString("weatherPlace", place)
+                            .putString("weatherQuery", WEATHER_QUERY).apply();
                     notifyListeners();
                 } catch (Exception e) {
                     weatherFailedAt = System.currentTimeMillis();
@@ -189,7 +247,7 @@ final class HomeData {
 
     private void parsePrices(String body) throws Exception {
         JSONArray list = new JSONArray(body);
-        String quote = QUOTE;
+        String quote = quote();
         int found = 0;
         for (int i = 0; i < list.length(); i++) {
             JSONObject o = list.getJSONObject(i);
@@ -208,7 +266,10 @@ final class HomeData {
 
     private static Weather parseWeather(String body) throws Exception {
         JSONObject o = new JSONObject(body);
-        TimeZone zone = TimeZone.getTimeZone(o.optString("timezone", TimeZone.getDefault().getID()));
+        // Open-Meteo writes every time at the place's offset of now, even past a DST change (Berlin's sunrise after the
+        // change still reads 07:51 at GMT+2): read them at that offset, as LG and Samsung do, not by the zone's rules.
+        TimeZone zone = o.has("utc_offset_seconds") ? new SimpleTimeZone(o.getInt("utc_offset_seconds") * 1000, "GMT")
+                : TimeZone.getTimeZone(o.optString("timezone", TimeZone.getDefault().getID()));
         Weather w = new Weather();
         JSONObject current = o.getJSONObject("current");
         w.temp = current.getDouble("temperature_2m");
@@ -235,6 +296,18 @@ final class HomeData {
                 w.hourDay.add(days == null || days.optInt(i, 1) == 1);
             }
         }
+        JSONArray dates = daily.getJSONArray("time"), highs = daily.getJSONArray("temperature_2m_max"),
+                lows = daily.getJSONArray("temperature_2m_min"), codes = daily.optJSONArray("weather_code");
+        long now = System.currentTimeMillis();
+        for (int i = 0; codes != null && i < dates.length() && w.days.size() < 5; i++) {
+            String date = dates.getString(i);
+            // Only days that haven't started at the city: today, and past days in a forecast kept offline, are left out.
+            if (localTime(date + "T12:00", zone) - 12 * 3600_000L <= now) continue;
+            w.days.add(localTime(date + "T12:00", TimeZone.getDefault()));   // its noon on the TV's clock: named right anywhere
+            w.dayMax.add(highs.optDouble(i));
+            w.dayMin.add(lows.optDouble(i));
+            w.dayCode.add(codes.optInt(i, -1));
+        }
         return w;
     }
 
@@ -242,6 +315,28 @@ final class HomeData {
         SimpleDateFormat f = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm", Locale.US);
         f.setTimeZone(zone);
         return f.parse(iso).getTime();
+    }
+
+    static List<String[]> findCity(String name) throws Exception {
+        String lang = Ui.language.replaceAll("-.*", "");   // Open-Meteo takes the language without the country
+        JSONObject o = new JSONObject(get("https://geocoding-api.open-meteo.com/v1/search?count=10&format=json&language=" + lang
+                + "&name=" + URLEncoder.encode(name.trim(), "UTF-8")));
+        JSONArray results = o.optJSONArray("results");
+        List<String[]> out = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();   // places with the same name, state and country read the same
+        for (int i = 0; results != null && i < results.length(); i++) {
+            JSONObject r = results.getJSONObject(i);
+            String city = r.optString("name", "");
+            if (city.isEmpty() || !r.has("latitude") || !r.has("longitude")) continue;
+            StringBuilder label = new StringBuilder(city);
+            for (String part : new String[] {r.optString("admin1", ""), r.optString("country", "")}) {
+                if (!part.isEmpty() && !part.equals(city)) label.append(", ").append(part);
+            }
+            if (!seen.add(label.toString())) continue;
+            out.add(new String[] {label.toString(), city,
+                    String.format(Locale.US, "%.4f", r.getDouble("latitude")), String.format(Locale.US, "%.4f", r.getDouble("longitude"))});
+        }
+        return out;
     }
 
     private static String get(String url) throws IOException {
@@ -268,12 +363,16 @@ final class HomeData {
      * Uses the last weather fetched (it moves ~1 min a day); without data, 6:00 and 18:00.
      */
     boolean isNight(long now) {
-        String theme = Prefs.theme();
+        return isNight(Prefs.theme(), now, weather.sunrise, weather.sunset);
+    }
+
+    /** The same from what it depends on (SleepOverlay gets these in its Intent). */
+    static boolean isNight(String theme, long now, long sunrise, long sunset) {
         if (theme.equals("dark")) return true;
         if (theme.equals("light")) return false;
         long t = Shaders.timeOfDay(now, 0);
-        long rise = Shaders.timeOfDay(weather.sunrise, 6 * 60 * 60_000L);
-        long set = Shaders.timeOfDay(weather.sunset, 18 * 60 * 60_000L);
+        long rise = Shaders.timeOfDay(sunrise, 6 * 60 * 60_000L);
+        long set = Shaders.timeOfDay(sunset, 18 * 60 * 60_000L);
         return t < rise || t >= set;
     }
 
@@ -283,72 +382,65 @@ final class HomeData {
         return Ui.locale();
     }
 
-    /** 580.4k · 21.0k · 1.04k · 5.61 (as short as possible; the dollar always with cents). */
+    /** 4.15M · 580.4k · 21.0k · 1.04k · 5.61 (as short as possible; the dollar always with cents). */
     static String price(double v) {
         if (Double.isNaN(v)) return "—";
+        if (v >= 1_000_000) return String.format(locale(), "%.2fM", v / 1_000_000);
         if (v >= 10_000) return String.format(locale(), "%.1fk", v / 1000);
         if (v >= 1000) return String.format(locale(), "%.2fk", v / 1000);
         return String.format(locale(), "%.2f", v);
     }
 
-    /** 416.3k · 12.2k · 1.04k · 531 · 5.05: abbreviated, for the price row on the home screen. */
+    /** 4.15M · 416.3k · 12.2k · 1.04k · 531 · 5.05: abbreviated, for the price row on the home screen. */
     static String compact(double v) {
         if (Double.isNaN(v)) return "—";
+        if (v >= 1_000_000) return String.format(locale(), "%.2fM", v / 1_000_000);   // Bitcoin in rubles…
         if (v >= 10_000) return String.format(locale(), "%.1fk", v / 1000);
         if (v >= 1000) return String.format(locale(), "%.2fk", v / 1000);
         if (v >= 100) return String.format(locale(), "%.0f", v);
         return String.format(locale(), "%.2f", v);
     }
 
-    /** $108,234 · $185.20 · R$ 581.234 · R$ 5,61 (cents only below a thousand), in the configured currency. */
+    /**
+     * $108,234 · $185.20 · R$ 581.234 · 74 264 € (cents only below a thousand), in the configured currency, with the
+     * symbol and spaces where the language puts them.
+     */
     static String brl(double v) {
         String symbol = currencySymbol();
         if (Double.isNaN(v)) return symbol + "—";
-        return Ui.once("brl", v, () -> v >= 1000 ? String.format(locale(), symbol + "%,.0f", v)
-                : String.format(locale(), symbol + "%.2f", v));
+        return Ui.once("brl", v, () -> {
+            DecimalFormat f = (DecimalFormat) NumberFormat.getCurrencyInstance(locale());
+            DecimalFormatSymbols s = f.getDecimalFormatSymbols();
+            s.setCurrencySymbol(symbol.trim());   // our symbols: ICU would write "US$" outside the US
+            f.setDecimalFormatSymbols(s);
+            f.setMinimumFractionDigits(v >= 1000 ? 0 : 2);
+            f.setMaximumFractionDigits(v >= 1000 ? 0 : 2);
+            return f.format(v);
+        });
     }
 
     /** The weather in words, from Open-Meteo's WMO code. */
     static String condition(int code, boolean day) {
         if (code < 0) return "";
-        if (Ui.en) {
-            if (code == 0) return "Clear";
-            if (code == 1) return day ? "Mostly Sunny" : "Mostly Clear";
-            if (code == 2) return "Partly Cloudy";
-            if (code == 3) return "Cloudy";
-            if (code == 45 || code == 48) return "Fog";
-            if (code >= 51 && code <= 57) return "Drizzle";
-            if (code == 65 || code == 67 || code == 82) return "Heavy Rain";
-            if (code >= 71 && code <= 77 || code == 85 || code == 86) return "Snow";
-            if (code >= 95) return "Thunderstorms";
-            return "Rain";
-        }
-        if (Ui.es) {
-            if (code == 0) return day ? "Despejado" : "Noche despejada";
-            if (code == 1) return "Mayormente despejado";
-            if (code == 2) return "Parcialmente nublado";
-            if (code == 3) return "Nublado";
-            if (code == 45 || code == 48) return "Niebla";
-            if (code >= 51 && code <= 57) return "Llovizna";
-            if (code == 65 || code == 67 || code == 82) return "Lluvia fuerte";
-            if (code >= 71 && code <= 77 || code == 85 || code == 86) return "Nieve";
-            if (code >= 95) return "Tormenta";
-            return "Lluvia";
-        }
-        if (code == 0) return day ? "Céu limpo" : "Noite limpa";
-        if (code == 1) return "Poucas nuvens";
-        if (code == 2) return "Parcialmente nublado";
-        if (code == 3) return "Nublado";
-        if (code == 45 || code == 48) return "Neblina";
-        if (code >= 51 && code <= 57) return "Garoa";
-        if (code == 65 || code == 67 || code == 82) return "Chuva forte";
-        if (code >= 71 && code <= 77 || code == 85 || code == 86) return "Neve";
-        if (code >= 95) return "Tempestade";
-        return "Chuva";
+        if (code == 0) return day ? Ui.tr("Clear") : Ui.tr("night|Clear");
+        if (code == 1) return day ? Ui.tr("Mostly Sunny") : Ui.tr("Mostly Clear");
+        if (code == 2) return Ui.tr("Partly Cloudy");
+        if (code == 3) return Ui.tr("Cloudy");
+        if (code == 45 || code == 48) return Ui.tr("Fog");
+        if (code >= 51 && code <= 57) return Ui.tr("Drizzle");
+        if (code == 65 || code == 67 || code == 82) return Ui.tr("Heavy Rain");
+        if (code >= 71 && code <= 77 || code == 85 || code == 86) return Ui.tr("Snow");
+        if (code >= 95) return Ui.tr("Thunderstorms");
+        return Ui.tr("Rain");
+    }
+
+    /** "H:24°  L:15°" (in Portuguese, "Máx. 24°  Mín. 15°"), with the given space between the two. */
+    static String highLow(Weather wx, String space) {
+        return Ui.trf("H:{max}", "max", degrees(wx.max)) + space + Ui.trf("L:{min}", "min", degrees(wx.min));
     }
 
     private static String currencySymbol() {
-        switch (CURRENCY) {
+        switch (inDollars ? "USD" : CURRENCY) {
             case "USD": return "$";
             case "BRL": return "R$ ";
             case "EUR": return "€";
@@ -371,15 +463,33 @@ final class HomeData {
         return "US".equals(Locale.getDefault().getCountry());
     }
 
-    /** "+1.2%" / "−0.8%" (a real minus sign). */
+    /** "+1.2%" / "−0.8%" (a real minus sign); "+1,2 %" in the languages that space the percent sign. */
     static String change(double v) {
         if (Double.isNaN(v)) return "";
-        return Ui.once("change", v, () -> (v >= 0 ? "+" : "−") + String.format(locale(), "%.1f%%", Math.abs(v)));
+        return Ui.once("change", v, () -> {
+            NumberFormat f = NumberFormat.getPercentInstance(locale());
+            f.setMinimumFractionDigits(1);
+            f.setMaximumFractionDigits(1);
+            return (v >= 0 ? "+" : "−") + f.format(Math.abs(v) / 100);
+        });
     }
 
     static String hour(long at) {
-        return Ui.once("hour", at, () -> Ui.en ? new SimpleDateFormat("h a", Locale.US).format(new java.util.Date(at))
-                : new SimpleDateFormat(Ui.es ? "HH:mm" : "HH'h'", Ui.locale()).format(new java.util.Date(at)));
+        return Ui.once(Prefs.clock24() ? "hour24" : "hour", at, () -> Ui.datePattern("format|h a").format(at));
+    }
+
+    /** "Seg", "Mon", "Lun", "Mo", "Пн": the short day of the week, capitalized and without the abbreviation's dot. */
+    static String weekday(long at) {
+        return Ui.once("weekday", at, () -> {
+            String s = Ui.datePattern("format|EEE").format(at);
+            if (s.endsWith(".")) s = s.substring(0, s.length() - 1);
+            return s.isEmpty() ? s : s.substring(0, 1).toUpperCase(Ui.locale()) + s.substring(1);
+        });
+    }
+
+    /** "Sunday", "domingo", "Sonntag": a day's full name, for TalkBack. */
+    static String weekdayName(long at) {
+        return Ui.once("weekdayName", at, () -> new SimpleDateFormat("EEEE", Ui.locale()).format(new java.util.Date(at)));
     }
 
     /** How long ago the data was fetched, if it's stale (no internet): "12 min ago". */
@@ -388,8 +498,6 @@ final class HomeData {
         long age = System.currentTimeMillis() - at;
         if (age < every * 2) return "";
         long minutes = age / 60_000;
-        if (Ui.en) return minutes < 60 ? minutes + " min ago" : (minutes / 60) + " h ago";
-        if (Ui.es) return minutes < 60 ? "hace " + minutes + " min" : "hace " + (minutes / 60) + " h";
-        return minutes < 60 ? "há " + minutes + " min" : "há " + (minutes / 60) + " h";
+        return minutes < 60 ? Ui.trf("{n} min ago", "n", minutes) : Ui.trf("{n} h ago", "n", minutes / 60);
     }
 }

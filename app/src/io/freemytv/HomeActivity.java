@@ -15,18 +15,21 @@ import android.widget.TextView;
  * back to the TV's original one.
  */
 public class HomeActivity extends Activity {
+    /** Opens All Apps (a remote's All Apps button, RemoteKeys). */
+    static final String EXTRA_ALL_APPS = "io.freemytv.ALL_APPS";
     private HomeView home;
     private int prefsVersion = Prefs.version;   // settings changed while we were away: start over
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         Watchdog.install(this);
+        SleepTimer.listen(this);
+        SleepTimer.check(this);
         if (Watchdog.crashedTooOften(this)) {
             // Don't try to draw again: only show a notice while the main process restores the original home screen.
             HomeMode.requestRevertHome(this);
             TextView t = new TextView(this);
-            t.setText(Ui.tr("O Início do Free My TV teve um problema.\nVoltando para o Início original da TV…",
-                    "Free My TV's home screen ran into a problem.\nGoing back to the TV's original home screen…"));
+            t.setText(Ui.tr("Free My TV's home screen ran into a problem.\nGoing back to the TV's original home screen…"));
             t.setTextColor(Color.WHITE);
             t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
             t.setGravity(Gravity.CENTER);
@@ -38,6 +41,7 @@ public class HomeActivity extends Activity {
         home = new HomeView(this);
         setContentView(home);
         getWindow().setBackgroundDrawable(null);
+        if (getIntent().getBooleanExtra(EXTRA_ALL_APPS, false)) home.showAllApps();
     }
 
     @Override protected void onResume() {
@@ -59,7 +63,9 @@ public class HomeActivity extends Activity {
     /** Home button pressed on the home screen: back to the entry state (focus on the first app, sheet closed). */
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
-        if (home != null) home.reset(true);
+        if (home == null) return;
+        if (intent.getBooleanExtra(EXTRA_ALL_APPS, false)) home.showAllApps();
+        else home.reset(true);
     }
 
     @Override protected void onDestroy() {
