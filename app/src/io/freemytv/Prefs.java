@@ -127,10 +127,15 @@ final class Prefs {
 
     static void setTemperature(String v) { put("temperature", v); }
 
-    /** "auto" (dark from sunset to sunrise), "light" or "dark". */
+    /** The themes after "auto", "light" and "dark": the dark look on a flat color, no photo behind (HomeView.FLAT). */
+    static final String[] FLAT_THEMES = {"oled", "gruvbox", "tokyonight", "catppuccin"};
+
+    /** "auto" (dark from sunset to sunrise), "light", "dark" or one of FLAT_THEMES. */
     static String theme() {
         String v = sp().getString("theme", Config.THEME.trim());
-        return v.equals("light") || v.equals("dark") ? v : "auto";
+        if (v.equals("light") || v.equals("dark")) return v;
+        for (String t : FLAT_THEMES) if (t.equals(v)) return v;
+        return "auto";
     }
 
     static void setTheme(String v) { put("theme", v); }

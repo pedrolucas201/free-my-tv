@@ -48,6 +48,7 @@ final class Ui {
     /** Bumped when the language changes: text cached by the screens is made again. */
     static volatile int generation;
     static Typeface thin, light, displayMedium, displaySemibold, regular, medium, semibold;
+    static Typeface mono, monoSemibold;   // JetBrains Mono: the small text of the terminal themes (HomeView.FLAT)
     private static boolean loaded;
     private static final Rect BOUNDS = new Rect();
     private static final RectF OVAL = new RectF();
@@ -63,7 +64,22 @@ final class Ui {
         regular = font(a, 14, 400);
         medium = font(a, 14, 500);
         semibold = font(a, 14, 600);
+        mono = monoFont(a, 500);
+        monoSemibold = monoFont(a, 700);
     }
+
+    private static Typeface monoFont(AssetManager a, int weight) {
+        if (has(a, MONO)) {
+            try {
+                Typeface t = new Typeface.Builder(a, MONO).setFontVariationSettings("'wght' " + weight).build();
+                if (t != null) return t;
+            } catch (RuntimeException ignored) {
+            }
+        }
+        return Typeface.MONOSPACE;
+    }
+
+    private static final String MONO = "fonts/JetBrainsMono.ttf";
 
     /** Inter at an optical size (14 = text, 32 = display) and weight; the system font if the file is missing. */
     private static Typeface font(AssetManager a, int opticalSize, int weight) {

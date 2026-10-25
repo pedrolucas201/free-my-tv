@@ -131,6 +131,55 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     // Night look (like Apple's "Automatic" appearance): darker from sunset to sunrise, with a 2 s transition.
     private static final long NIGHT_MS = 2000;
     private boolean nightTarget;
+    private int[] flat;                 // a flat theme's colors (FLAT), or null: the night look without the photo behind
+    /**
+     * Flat themes (Prefs.FLAT_THEMES), the palettes of a themed desktop (terminal, bar, window borders): background,
+     * text, dimmed text, accent (focus and the selected tab), surface (the glass), border (around every card and app,
+     * the accent on the focused one; = background for none), up, down, warm (the coins), and 1 for JetBrains Mono in the
+     * small text. Dimmed text is a step lighter than the desktop's where that one reads under 4:1 on the background.
+     */
+    private static final Map<String, int[]> FLAT = new HashMap<>();
+    private static final int F_BG = 0, F_INK = 1, F_DIM = 2, F_ACCENT = 3, F_SURFACE = 4, F_BORDER = 5, F_UP = 6, F_DOWN = 7,
+            F_WARM = 8, F_MONO = 9;
+    static {
+        FLAT.put("oled", new int[] {0xFF000000, 0xFFF5F5F7, 0xFF8E8E93, 0xFFFFFFFF, 0xFF000000, 0xFF000000, 0xFF30D158,
+                0xFFFF453A, 0xFF8E8E93, 0});
+        FLAT.put("gruvbox", new int[] {0xFF1D2021, 0xFFEBDBB2, 0xFF928374, 0xFFFE8019, 0xFF3C3836, 0xFF504945, 0xFFB8BB26,
+                0xFFFB4934, 0xFFFABD2F, 1});
+        FLAT.put("tokyonight", new int[] {0xFF0F0F14, 0xFFC0CAF5, 0xFF737AA2, 0xFF7AA2F7, 0xFF24283B, 0xFF3B4261, 0xFF9ECE6A,
+                0xFFF7768E, 0xFFE0AF68, 1});
+        FLAT.put("catppuccin", new int[] {0xFF1E1E2E, 0xFFCDD6F4, 0xFF9399B2, 0xFFFAB387, 0xFF313244, 0xFF45475A, 0xFFA6E3A1,
+                0xFFF38BA8, 0xFFF9E2AF, 1});
+    }
+
+    /** A flat theme with a border around every card and app (a tiling desktop's windows). */
+    private boolean borders() {
+        return flat != null && flat[F_BORDER] != flat[F_BG];
+    }
+
+    /** JetBrains Mono for the tabs, the card's line and the quotes in the terminal themes; Inter otherwise. */
+    private void applyFonts() {
+        if (lTab == null) return;
+        boolean mono = flat != null && flat[F_MONO] == 1;
+        lTab.setTypeface(mono ? Ui.mono : Ui.medium);
+        lTabOn.setTypeface(mono ? Ui.monoSemibold : Ui.semibold);
+        lCardMeta.setTypeface(mono ? Ui.mono : Ui.medium);
+        lQuote.setTypeface(mono ? Ui.mono : Ui.regular);
+        // Mono runs wider: a size smaller keeps the tabs and the card's line where they were.
+        lTab.setTextSize((mono ? 27 : 30) * k);
+        lTabOn.setTextSize((mono ? 27 : 30) * k);
+        lCardMeta.setTextSize((mono ? 22 : 25) * k);
+        lQuote.setTextSize((mono ? 20 : 21) * k);
+    }
+
+    /** The flat theme's accent, or white (the focus rims of the other looks). */
+    private int accent() {
+        return flat != null ? flat[F_ACCENT] : 0xFFFFFFFF;
+    }
+    /** Mostly white app cards (a TV's own live TV banner) at night: inverted with the hues kept, like a smart invert. */
+    private static final android.graphics.ColorMatrixColorFilter DARK_CARD = new android.graphics.ColorMatrixColorFilter(
+            new float[] {0.574f, -1.43f, -0.144f, 0, 255, -0.426f, -0.43f, -0.144f, 0, 255, -0.426f, -1.43f, 0.856f, 0, 255,
+                    0, 0, 0, 1, 0});
     private float night, nightFrom;     // 0 = day, 1 = night
     private long nightAt;
     private final int[] glassNight = new int[Backdrop.GW * Backdrop.GH], frostNight = new int[Backdrop.FW * Backdrop.FH];
@@ -636,6 +685,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         lQuote = Ui.numbers(Ui.regular, 21 * k, L_FAINT);
         lTip = Ui.text(Ui.semibold, 25 * k, L_INK);
         lTip.setTextAlign(Paint.Align.CENTER);
+        applyFonts();
         lDate = Ui.text(Ui.semibold, 34 * k, L_DIM);
         lClock = Ui.numbers(Ui.light, 200 * k, L_INK);
         lClock.setLetterSpacing(-0.01f);
@@ -933,6 +983,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** What the glass shows: the photo lightened (by day), darkened (at night) or blended in between. */
     private int[] glassOf(Backdrop b) {
+        if (flat != null) return fill(neutralGlassPx, flat[F_SURFACE]);
         if (b.nightGlass == null || night <= 0.001f) return b.lightGlass;
         if (night >= 0.999f) return b.nightGlass;
         // During the transition, the blend (only for the current background; a photo fading in uses the nearer side).
@@ -949,7 +1000,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             nightPair = false;
             return;
         }
-        int color = blend(0xFFEBEBF0, 0xFF141416, night);
+        int color = flat != null ? flat[F_SURFACE] : blend(0xFFEBEBF0, 0xFF141416, night);
         java.util.Arrays.fill(neutralFrostPx, color);
         java.util.Arrays.fill(neutralGlassPx, color);
         scene.setFrost(neutralFrostPx);
@@ -959,6 +1010,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** What the frosted glass shows (drawer, toasts): the blurred photo, darkened at night. */
     private int[] frostOf(Backdrop b) {
+        if (flat != null) return fill(neutralFrostPx, flat[F_SURFACE]);
         if (b.nightFrost == null || night <= 0.001f) return b.frost;
         if (night >= 0.999f) return b.nightFrost;
         if (b != bgTo) return night < 0.5f ? b.frost : b.nightFrost;
@@ -971,6 +1023,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     /** Day or night right now (from the sun at your location); `animate`: with the transition. */
     private void checkNight(boolean animate) {
         boolean want = data.isNight(System.currentTimeMillis());
+        int[] f = FLAT.get(Prefs.theme());
+        if (f != flat) {   // dark ⇄ a flat theme keeps the night value: only the background, glass and text change
+            flat = f;
+            applyFonts();
+            layoutLight();
+            if (want == nightTarget) nightChanged();
+        }
         if (want == nightTarget) return;
         nightTarget = want;
         if (animate && running) {
@@ -1032,20 +1091,21 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         return onLight + (onDark - onLight) * dark();
     }
 
-    /** Text colors for the current night value (dark by day, white at night). */
+    /** Text colors for the current night value (dark by day, white at night; a flat theme's own at night). */
     private void applyTone() {
-        lTitle.setColor(tone(L_INK, WHITE));
-        lTab.setColor(tone(L_DIM, 0xFF8E8E93));
-        lTabOn.setColor(tone(L_INK, WHITE));
-        lCardTitle.setColor(tone(L_INK, WHITE));
-        lCardMeta.setColor(tone(L_DIM, 0xFF98989D));
-        lQuote.setColor(tone(L_FAINT, 0xB8FFFFFF));
-        lTip.setColor(tone(L_INK, WHITE));
-        lDate.setColor(tone(L_DIM, 0xFF98989D));
-        lClock.setColor(tone(L_INK, WHITE));
-        lWeather.setColor(tone(L_DIM, 0xFF98989D));
-        lClockQuote.setColor(tone(L_DIM, 0xFF98989D));
-        staleQuote.setColor(tone(L_FAINT, 0x99FFFFFF));
+        int ink = flat != null ? flat[F_INK] : WHITE, dim = flat != null ? flat[F_DIM] : 0xFF98989D;
+        lTitle.setColor(tone(L_INK, ink));
+        lTab.setColor(tone(L_DIM, flat != null ? flat[F_DIM] : 0xFF8E8E93));
+        lTabOn.setColor(tone(L_INK, flat != null ? flat[F_ACCENT] : ink));
+        lCardTitle.setColor(tone(L_INK, ink));
+        lCardMeta.setColor(tone(L_DIM, dim));
+        lQuote.setColor(tone(L_FAINT, flat != null ? flat[2] : 0xB8FFFFFF));
+        lTip.setColor(tone(L_INK, ink));
+        lDate.setColor(tone(L_DIM, dim));
+        lClock.setColor(tone(L_INK, ink));
+        lWeather.setColor(tone(L_DIM, dim));
+        lClockQuote.setColor(tone(L_DIM, dim));
+        staleQuote.setColor(tone(L_FAINT, flat != null ? Ui.alpha(flat[2], 0.6f) : 0x99FFFFFF));
     }
 
     private boolean tickBackgroundFade(long up) {
@@ -1088,6 +1148,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private static float fadeEase(long start, long up, float duration) {
         float t = Ui.clamp((up - start) / duration);
         return t * t * (3 - 2 * t);
+    }
+
+    private static int[] fill(int[] px, int color) {
+        if (px[0] != color) java.util.Arrays.fill(px, color);
+        return px;
     }
 
     private static int mix(int a, int b, float f) {
@@ -1337,10 +1402,14 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         float total = spacing * (n - 1);
         for (int i = 0; i < n; i++) total += q.glyphs[i] + gap + q.widths[i];
         float x = clock ? MARGIN * k : right - total;
-        int coinColor = clock ? text.getColor() : Ui.alpha(tone(0xB38E8E93, 0x8CFFFFFF), fade);
+        int coinColor = clock ? text.getColor() : Ui.alpha(flat != null ? flat[F_WARM] : tone(0xB38E8E93, 0x8CFFFFFF), fade);
+        int plain = text.getColor();
         for (int i = 0; i < n; i++) {
             Glyphs.coin(getContext(), c, HomeData.COINS[coins[i]], x + q.glyphs[i] / 2, base - cap / 2, cap, coinColor);
             x += q.glyphs[i] + gap;
+            // A flat theme colors each price by its 24 h change, like a status bar.
+            double change = flat != null && coins[i] < data.changes.length ? data.changes[coins[i]] : Double.NaN;
+            text.setColor(Double.isNaN(change) ? plain : Ui.alpha(change >= 0 ? flat[F_UP] : flat[F_DOWN], fade));
             c.drawText(q.values[i], x, base, text);
             x += q.widths[i] + spacing;
         }
@@ -1372,7 +1441,16 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         shelfOn = Math.min(1, on);
         // The whole shelf shows it has the focus too: a rim just outside its glass (dark by day: white wouldn't show on
         // white glass). Here and not on the glass's layer, which only changes with the background.
-        if (shelfOn > 0.01f && !shelf.isEmpty()) {
+        if (flat != null && flat[F_BORDER] != flat[F_BG] && !shelf.isEmpty()) {
+            // A flat theme's panel: a thin border in its own color, always (like the bars of a tiling desktop).
+            float radius = (TILE_RADIUS + SHELF_PAD) * k;
+            rim.setShader(null);
+            rim.setColor(flat[F_BORDER]);
+            rim.setStrokeWidth(2 * k);
+            c.drawRoundRect(platterRect, radius, radius, rim);
+            rim.setStrokeWidth(2.5f * k);
+        }
+        if (shelfOn > 0.01f && !shelf.isEmpty() && flat == null) {   // on a flat color the rim is all that shows: none
             float out = 6 * k, radius = (TILE_RADIUS + SHELF_PAD) * k + out;
             tmp.set(platterRect.left - out, platterRect.top - out, platterRect.right + out, platterRect.bottom + out);
             rim.setShader(null);
@@ -1479,8 +1557,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             tileFill.setColor(0xFF161618);
             c.drawRoundRect(cell, r, r, tileFill);
             drawLogo(c, it, cell, s, 0);
-        } else {
-            if (it.tile != null) roundImage(c, it.tile, it.tileShader, cell, r);
+        } else if (it.tile != null) {
+            if (it.light && night > 0.5f) imageFill.setColorFilter(DARK_CARD);
+            roundImage(c, it.tile, it.tileShader, cell, r);
+            imageFill.setColorFilter(null);
         }
         // Which one has the focus, at a glance: a light rim on it (as on the focused card) and a shade on the others.
         float shade = shelfOn * (1 - fc) * (1 - Ui.clamp(l));
@@ -1489,11 +1569,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             tileFill.setColor(Ui.alpha(0xFF000000, tone(0.34f, 0.48f) * shade));
             c.drawRoundRect(cell, r, r, tileFill);
         }
-        if (fc > 0.01f) {
+        if (fc > 0.01f || borders()) {   // a flat theme's border on every app, turning to the accent on the focused one
             float inset = 1.25f * k;
             tmp.set(cell.left + inset, cell.top + inset, cell.right - inset, cell.bottom - inset);
             rim.setShader(null);
-            rim.setColor(Ui.alpha(0xFFFFFFFF, 0.85f * fc));
+            rim.setColor(borders() ? blend(flat[F_BORDER], flat[F_ACCENT], fc) : Ui.alpha(accent(), 0.85f * fc));
             c.drawRoundRect(tmp, r - inset, r - inset, rim);
         }
     }
@@ -1870,7 +1950,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             c.drawText(priceText[i], right - 128 * k, base, pricePaint);
             double change = data.changes[i];
             if (Double.isNaN(change)) continue;
-            int color = change >= 0 ? tone(0xFF248A3D, UP_COLOR) : tone(0xFFD70015, DOWN_COLOR);
+            int color = change >= 0 ? tone(0xFF248A3D, flat != null ? flat[F_UP] : UP_COLOR)
+                    : tone(0xFFD70015, flat != null ? flat[F_DOWN] : DOWN_COLOR);
             tmp.set(right - 108 * k, mid - 17 * k, right, mid + 17 * k);
             fill.setShader(null);
             fill.setColor(Ui.alpha(color, 0.2f));
@@ -2971,6 +3052,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
      * same photo almost black (or a dark gradient), drawn on top during the transition.
      */
     private void drawLightSky(Canvas c) {
+        if (flat != null) {
+            c.drawColor(flat[F_BG]);
+            return;
+        }
         long up = SystemClock.uptimeMillis();
         float e = bgFadeAt == 0 ? 1 : fadeEase(bgFadeAt, up);
         boolean fading = bgFadeAt != 0;
@@ -3031,11 +3116,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                     shadows.draw(c, tmp, rr, SHADOW_BLUR * k, shadow);
                 }
                 fill.setShader(null);
-                fill.setColor(Ui.alpha(0xFFFFFFFF, focus));
+                fill.setColor(Ui.alpha(accent(), focus));
                 c.drawRoundRect(cell, rr, rr, fill);
             }
             Paint p = i == tab ? lTabOn : lTab;
-            if (i == tab) lTabOn.setColor(blend(tone(L_INK, WHITE), L_INK, focus));   // always dark on the white pill
+            if (i == tab && flat != null) lTabOn.setColor(blend(tone(L_INK, flat[F_ACCENT]), flat[F_BG], focus));   // on the accent pill
+            else if (i == tab) lTabOn.setColor(blend(tone(L_INK, WHITE), L_INK, focus));   // always dark on the white pill
             c.drawText(tabs()[i], r.centerX() - p.measureText(tabs()[i]) / 2, r.centerY() + Ui.halfCap(p), p);
         }
         int top = -1;
@@ -3096,8 +3182,17 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             roundImage(c, img, i == 0 ? b.wideShader : b.tallShader, cell, r);
         } else {
             fill.setShader(null);
-            fill.setColor(tone(0xFFDADADF, 0xFF2C2C2E));
+            fill.setColor(flat != null ? flat[F_SURFACE] : tone(0xFFDADADF, 0xFF2C2C2E));
             c.drawRoundRect(cell, r, r, fill);
+        }
+        if (borders()) {   // every card has the theme's border (the focused one's accent rim draws over it)
+            float inset = 1 * k;
+            tmp.set(cell.left + inset, cell.top + inset, cell.right - inset, cell.bottom - inset);
+            rim.setShader(null);
+            rim.setColor(flat[F_BORDER]);
+            rim.setStrokeWidth(2 * k);
+            c.drawRoundRect(tmp, r - inset, r - inset, rim);
+            rim.setStrokeWidth(2.5f * k);
         }
         if (f > 0.01f) {
             if (lightSheens.length != cardRects.length) {
@@ -3119,7 +3214,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             sheen.setAlpha(alpha);
             c.drawRoundRect(tmp, r0, r0, sheen);
             sheen.setAlpha(255);
-            rim.setShader(lightRims[i]);
+            if (flat != null) {   // a flat theme's accent, solid
+                rim.setShader(null);
+                rim.setColor(flat[F_ACCENT]);
+            } else {
+                rim.setShader(lightRims[i]);
+            }
             rim.setAlpha(alpha);
             rim.setStrokeWidth(2.5f * k / s);
             c.drawRoundRect(tmp, r0, r0, rim);

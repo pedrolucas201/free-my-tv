@@ -368,8 +368,8 @@ final class HomeData {
 
     /** The same from what it depends on (SleepOverlay gets these in its Intent). */
     static boolean isNight(String theme, long now, long sunrise, long sunset) {
-        if (theme.equals("dark")) return true;
         if (theme.equals("light")) return false;
+        if (!theme.equals("auto")) return true;   // dark and the flat themes
         long t = Shaders.timeOfDay(now, 0);
         long rise = Shaders.timeOfDay(sunrise, 6 * 60 * 60_000L);
         long set = Shaders.timeOfDay(sunset, 18 * 60 * 60_000L);

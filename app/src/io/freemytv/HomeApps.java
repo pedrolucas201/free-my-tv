@@ -74,10 +74,30 @@ final class HomeApps {
         float logoInk;      // fraction of the logo with ink (thin logos are drawn larger, with the same "weight")
         float logoScale = 1; // size tweak by eye (compact logos need more)
         boolean connected = true;
+        boolean light;      // the card is mostly white (HomeView darkens it at night)
 
         void setTile(Bitmap b) {
             tile = b;
             tileShader = b == null ? null : new BitmapShader(b, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+            try {
+                light = b != null && mostlyWhite(b);
+            } catch (RuntimeException e) {   // a hardware bitmap can't be read
+                light = false;
+            }
+        }
+
+        /** Over 60% of a 16×9 sample is near white. */
+        private static boolean mostlyWhite(Bitmap b) {
+            Bitmap s = Bitmap.createScaledBitmap(b, 16, 9, true);
+            int white = 0;
+            for (int y = 0; y < 9; y++) {
+                for (int x = 0; x < 16; x++) {
+                    int p = s.getPixel(x, y);
+                    if (((p >> 16) & 255) > 215 && ((p >> 8) & 255) > 215 && (p & 255) > 215) white++;
+                }
+            }
+            if (s != b) s.recycle();
+            return white > 16 * 9 * 0.6f;
         }
     }
 
