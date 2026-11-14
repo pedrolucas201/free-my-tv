@@ -2533,8 +2533,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         heroChanged |= aim(watchFocus, !sheetOpen && zone == Z_WATCH ? watchIndex : -1, snap);
         updateTint();
-        // The row scrolls so the focused card is at most the third one on screen.
-        float watchTo = Math.max(0, Math.min(watchIndex - 2, watching.size() - 3));
+        // The row scrolls so the focused card is at most the third one on screen, and stops with the last card at the
+        // right edge (3 fit on its own top, 5 when it's drawn smaller under the picks).
+        float watchTo = Math.max(0, Math.min(watchIndex - 2, watching.size() - (rowsMode() ? 5 : 3)));
         if (watchScroll.target != watchTo || snap) {
             heroChanged = true;
             if (snap) watchScroll.snap(watchTo); else watchScroll.target = watchTo;
@@ -2831,7 +2832,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             // Only read when it's shown: with the picks or the clock, Continue Watching costs nothing.
             final String mode = Prefs.topContent();
             final boolean allowed = WatchNext.allowed(c);
-            final List<WatchNext.Item> w = mode.equals(Prefs.TOP_CONTINUE) || mode.equals(Prefs.TOP_BOTH)
+            final List<WatchNext.Item> w = mode.equals(Prefs.TOP_CONTINUE) || mode.equals(Prefs.TOP_BOTH) || mode.equals(Prefs.TOP_ROWS)
                     ? WatchNext.load(c) : new ArrayList<>();
             handler.post(() -> {
                 // A provider/package refresh must not cancel a drag or undo a move that was just saved.
@@ -3820,7 +3821,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         for (int i = picksMode() ? 0 : nTabs(); i < nTabs() + lightButtons.size(); i++) out.add(a11yId(Z_TOP, i));
         for (int i = 0; i < Math.min(Recs.MAX_CARDS, cards.size()); i++) out.add(a11yId(Z_CARDS, i));
-        if (continueMode()) for (int i = 0; i < watching.size(); i++) out.add(a11yId(Z_WATCH, i));
+        if (watchShown()) for (int i = 0; i < watching.size(); i++) out.add(a11yId(Z_WATCH, i));
         for (int i = shelfFirst; i < Math.min(shelf.size(), shelfFirst + shelfVisible); i++) out.add(a11yId(Z_SHELF, i));
         for (int i = 0; i < drawerItems.size(); i++) out.add(a11yId(Z_DRAWER, i));
         if (drawerOpen && Prefs.weather()) out.add(a11yId(WIDGETS, 0));
@@ -3948,7 +3949,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             return !reordering && !menuOpen && !sheetOpen && shelf.size() > 1 && i < shelf.size()
                     && shelf.get(i).kind == HomeApps.APP && shelf.get(i).pkg != null;
         }
-        return group == Z_WATCH && !menuOpen && continueMode() && i < watching.size();
+        return group == Z_WATCH && !menuOpen && watchShown() && i < watching.size();
     }
 
     private int a11yFocused() {
@@ -4156,7 +4157,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** The cards side by side: the one at cardIndex wide, the others tall, sliding as `cardOpen` moves. */
     private void layoutCards() {
-        float top = L_CARDS_TOP * k, ch = L_CARD_H * k, g = L_CARD_GAP * k, tall = L_TALL_W * k;
+        float top = L_CARDS_TOP * k, ch = (rowsMode() ? L_ROWS_CARD_H : L_CARD_H) * k, g = L_CARD_GAP * k, tall = L_TALL_W * k;
         float wide = (CONTENT_R - MARGIN) * k - 2 * tall - 2 * g, x = MARGIN * k - cardScroll.value * (tall + g);
         for (int i = 0; i < Recs.MAX_CARDS; i++) {
             float w = Math.max(tall * 0.5f, tall + (wide - tall) * cardOpen[i].value);
@@ -4211,7 +4212,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** Picks need a TMDB key: without one, "picks" shows the clock, like "nothing". */
     private boolean picksMode() {
-        return (topMode.equals(Prefs.TOP_PICKS) || topMode.equals(Prefs.TOP_BOTH)) && picksOn();
+        return (topMode.equals(Prefs.TOP_PICKS) || topMode.equals(Prefs.TOP_BOTH) || topMode.equals(Prefs.TOP_ROWS)) && picksOn();
     }
 
     /** The picks with Continue Watching as their second tab (Settings > Top of the screen). */
@@ -4255,7 +4256,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         boolean modeChanged = !mode.equals(topMode);
         boolean listChanged = !sameWatching(list, watching);
         // The permission (granted or taken back) and the first read change what an empty row says: redraw for those.
-        boolean shown = mode.equals(Prefs.TOP_CONTINUE) || mode.equals(Prefs.TOP_BOTH);
+        boolean shown = mode.equals(Prefs.TOP_CONTINUE) || mode.equals(Prefs.TOP_BOTH) || mode.equals(Prefs.TOP_ROWS);
         boolean textChanged = allowed != watchAllowed || !watchLoaded && shown;
         watchAllowed = allowed;
         if (shown) watchLoaded = true;
@@ -4342,7 +4343,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         // Cards scrolled past the left margin slide out under this edge instead of leaving a sliver there (the first
         // card's focus growth and shadow still fit).
         c.save();
-        c.clipRect(watchLeftEdge(), 0, w, h);
+        c.clipRect(watchLeftEdge(), 0, watchRight(), h);
         for (int i = 0; i < watching.size(); i++) if (i != top) drawWatchCard(c, i);
         if (top >= 0) drawWatchCard(c, top);
         c.restore();
@@ -4350,6 +4351,40 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private float watchLeftEdge() {
         return (MARGIN - 32) * k;
+    }
+
+    /** The screen's right edge in the row's own units (drawn scaled down under the picks in rows mode). */
+    private float watchRight() {
+        return MARGIN * k + (w - MARGIN * k) / watchScale;
+    }
+
+    // Rows mode (Settings > Top of the screen): the picks shorter, Continue Watching's row under them at this scale. All of
+    // it stays above the hero layer's bottom (790): its texts end near 775.
+    private static final float L_ROWS_CARD_H = 190, L_ROWS_LABEL_BASE = 534, L_ROWS_WATCH_TOP = 552, ROWS_WATCH_SCALE = 0.58f;
+    private float watchScale = 1;
+
+    /** The picks, shorter, with Continue Watching as a smaller row under them. */
+    private boolean rowsMode() {
+        return topMode.equals(Prefs.TOP_ROWS) && picksOn();
+    }
+
+    /** Continue Watching's row is on screen: its own top, the Continue tab, or under the picks. */
+    private boolean watchShown() {
+        return continueMode() || rowsMode();
+    }
+
+    /** Rows mode: the label, then the row drawn as on its own top, scaled down (texts, focus and progress with it). */
+    private void drawWatchUnder(Canvas c) {
+        c.drawText(Ui.tr("Continue Watching"), MARGIN * k, L_ROWS_LABEL_BASE * k, lTab);
+        float m = MARGIN * k;
+        c.save();
+        c.translate(m, L_ROWS_WATCH_TOP * k);
+        c.scale(ROWS_WATCH_SCALE, ROWS_WATCH_SCALE);
+        c.translate(-m, -L_CARDS_TOP * k);
+        watchScale = ROWS_WATCH_SCALE;
+        drawWatchRow(c);
+        watchScale = 1;
+        c.restore();
     }
 
     /** `ink`, or as much nearer black (light backgrounds) or white (dark ones) as it takes for 4.5:1 on `bg`. */
@@ -4377,7 +4412,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     /** Like a pick's card (same focus, shadow, sheen and rim), with the progress bar on the picture. */
     private void drawWatchCard(Canvas c, int i) {
         watchRect(i, cell);
-        if (cell.left > w || cell.right <= watchLeftEdge()) return;   // scrolled off screen
+        if (cell.left > watchRight() || cell.right <= watchLeftEdge()) return;   // scrolled off screen
         WatchNext.Item it = watching.get(i);
         float v = watchFocus[i].value, f = Ui.clamp(v), s = 1 + 0.05f * v;
         float bw = cell.width(), bh = cell.height(), r0 = 18 * k, r = r0 * s;
@@ -4511,7 +4546,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     // MARK: - Continue Watching: the menu of a held card
 
     private boolean canHold() {
-        return zone == Z_WATCH && !sheetOpen && !drawerOpen && continueMode() && watchIndex < watching.size();
+        return zone == Z_WATCH && !sheetOpen && !drawerOpen && watchShown() && watchIndex < watching.size();
     }
 
     /** The focused card's menu (held OK, or TalkBack's long click). */
@@ -4862,6 +4897,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         int top = -1;
         int slots = cardSlots;   // the others aren't drawn: at 3, no card peeks in at the right edge
         for (int i = 0; i < slots; i++) if (cardFocus[i].value > 0.02f && (top < 0 || cardFocus[i].value > cardFocus[top].value)) top = i;
+        if (rowsMode()) drawWatchUnder(c);   // under the cards: a focused card grows over it
         for (int i = 0; i < slots; i++) if (i != top) drawLightCard(c, i);
         if (top >= 0) drawLightCard(c, top);
         if (HomeData.coinCount() > 0 || playingTab != null) drawQuotes(c);
@@ -4973,6 +5009,20 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         // The cards peeking in at the sides show only their image: their text would start off screen.
         if (p == null || base.left < 0 || base.left > (CONTENT_R - 100) * k) return;
+        if (rowsMode()) {   // one line under the shorter card: the title, then (as it widens) the details beside it
+            fitPaint.set(lCardTitle);
+            String t = TextUtils.ellipsize(p.title, fitPaint, bw, TextUtils.TruncateAt.END).toString();
+            float line = base.bottom + 40 * k, x = base.left + lCardTitle.measureText(t) + 24 * k;
+            c.drawText(t, base.left, line, lCardTitle);
+            if (open > 0.02f && p.meta != null && !p.meta.isEmpty() && base.right - x > 60 * k) {
+                fitPaint.set(lCardMeta);
+                int a = lCardMeta.getAlpha();
+                lCardMeta.setAlpha(Math.round(a * open));
+                c.drawText(TextUtils.ellipsize(p.meta, fitPaint, base.right - x, TextUtils.TruncateAt.END).toString(), x, line, lCardMeta);
+                lCardMeta.setAlpha(a);
+            }
+            return;
+        }
         fitPaint.set(lCardTitle);
         c.drawText(TextUtils.ellipsize(p.title, fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left, base.bottom + 46 * k, lCardTitle);
         if (open > 0.02f && p.meta != null && !p.meta.isEmpty()) {
@@ -5093,7 +5143,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                     }
                     break;
                 }
-                if (watchTab() && !watching.isEmpty()) {
+                if ((watchTab() || rowsMode()) && !watching.isEmpty()) {
                     zone = Z_WATCH;
                 } else if (cards.isEmpty()) {
                     if (!picksOn() && lightButtons.isEmpty()) return true;   // no tabs and no buttons above
@@ -5112,6 +5162,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 } else if (dy < 0) {
                     zone = Z_TOP;
                     topIndex = tab;     // as on Apple TV: moving up to the tabs focuses the selected tab
+                } else if (rowsMode() && !watching.isEmpty()) {   // rows mode: down to Continue Watching
+                    zone = Z_WATCH;
                 } else {
                     zone = Z_SHELF;
                     if (!shelf.isEmpty()) shelfIndex = nearest(tileRects, tileRects.length, cardRects[cardIndex].centerX());
@@ -5123,6 +5175,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                     if (next == watchIndex) return true;
                     watchIndex = next;
                 } else if (dy < 0) {
+                    if (rowsMode() && !cards.isEmpty()) {   // rows mode: up to the picks above
+                        zone = Z_CARDS;
+                        break;
+                    }
                     if (picksMode()) {   // the Continue tab: up to the tabs, on the selected one
                         zone = Z_TOP;
                         topIndex = tab;
