@@ -1125,6 +1125,7 @@ public class SettingsActivity extends Activity {
             v[TOP_ROW] = top.equals(Prefs.TOP_CONTINUE) ? Ui.tr("Continue Watching")
                     : top.equals(Prefs.TOP_BOTH) ? Ui.tr("Picks + Continue tab")
                     : top.equals(Prefs.TOP_ROWS) ? Ui.tr("Picks + Continue row")
+                    : top.equals(Prefs.TOP_SHOWCASE) ? Ui.tr("Showcase")
                     : top.equals(Prefs.TOP_NONE) ? Ui.tr("Clock")
                     : Ui.tr("Picks");
             v[WATCH_ROW] = watchCount();

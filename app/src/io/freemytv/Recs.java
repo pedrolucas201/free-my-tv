@@ -51,6 +51,7 @@ final class Recs {
         int id;
         String kind;            // "movie" or "tv"
         String title, backdrop, poster, meta = "", app, pkg;   // poster: the portrait image of the narrow cards
+        String overview = "";   // the synopsis (under the title in the showcase)
         String link;            // opens the title in its app (looked up with Watchmode), or null: the app's home
         String servicePkg;      // open_in_stremio/-_nuvio: the TV's own app it streams on (pkg is then Stremio's or Nuvio's)
         String tag;             // Trakt: "Up next: S2 E5", "On your watchlist"…, first in the meta; else null
@@ -75,7 +76,7 @@ final class Recs {
     /** How often Trakt is asked whether the account changed (marked watched, the watchlist): one small request. */
     private static final long TRAKT_EVERY = 10 * 60_000L;
     /** Bump when what is saved for each title changes (the saved list is discarded and fetched again). */
-    private static final int CACHE_VERSION = 6;   // 6: lists of up to POOL + TRAKT_MAX
+    private static final int CACHE_VERSION = 7;   // 6: lists of up to POOL + TRAKT_MAX; 7: the synopsis
     /** TMDB's titles in the list (trending, then the new releases), as on main. */
     private static final int POOL = 24;
     /** Trakt's titles in the list: about what the tabs show of them (now(): up to 2 in 5 in progress, 3 in 5 liked). */
@@ -523,6 +524,58 @@ final class Recs {
             }
         });
         return null;
+    }
+
+    // The showcase (Settings > Top of the screen): the focused pick's photo full screen, darkened where the text and the
+    // row sit. Its own small cache: a full-screen image is ~8 MB of GPU memory, so only the focused one and its
+    // neighbours are kept (the cards' cache holds 10 picks).
+    private static final int SHOWCASE_KEEP = 3;
+    private final Map<String, Bitmap> showcase = new LinkedHashMap<>(4, 0.75f, true);
+    private final java.util.Set<String> showcasePending = new java.util.HashSet<>();
+
+    /** The pick's full-screen photo, ready (or null: built in the background, listeners told when it's ready). */
+    Bitmap showcase(Pick p) {
+        if (p == null || p.backdrop == null) return null;
+        final String key = p.backdrop;
+        synchronized (showcase) {
+            Bitmap b = showcase.get(key);
+            if (b != null) return b;
+            if (!showcasePending.add(key)) return null;
+        }
+        io.execute(() -> {
+            try {
+                if (!hasImage(p)) return;   // the cards' loading downloads it; asked again when they're ready
+                Bitmap src = decodeForScreen(imageFile(p));
+                Bitmap full = src == null ? null : Backdrop.make(src, false).image;
+                if (full == null) return;
+                synchronized (showcase) {
+                    showcase.put(key, full);
+                    while (showcase.size() > SHOWCASE_KEEP) showcase.remove(showcase.keySet().iterator().next());
+                }
+                notifyListeners();
+            } catch (RuntimeException | OutOfMemoryError e) {
+                AppLog.w("showcase image: " + e.getMessage());
+            } finally {
+                synchronized (showcase) { showcasePending.remove(key); }
+            }
+        });
+        return null;
+    }
+
+    /** Leaving the showcase: its images go (their GPU memory with them). */
+    void dropShowcase() {
+        synchronized (showcase) { showcase.clear(); }
+    }
+
+    /** The photo decoded at no less than the UI's width (a power-of-two step down), or null. */
+    private static Bitmap decodeForScreen(File f) {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(f.getPath(), bounds);
+        BitmapFactory.Options opts = new BitmapFactory.Options();
+        opts.inSampleSize = 1;
+        while (bounds.outWidth / (opts.inSampleSize * 2) >= Backdrop.W) opts.inSampleSize *= 2;
+        return BitmapFactory.decodeFile(f.getPath(), opts);
     }
 
     private boolean hasImage(Pick p) {
@@ -982,6 +1035,7 @@ final class Recs {
         JSONObject o = get("/" + p.kind + "/" + p.id
                 + "?language=" + lang() + "&append_to_response=watch/providers,images" + (Config.OPEN_IN_STREMIO ? ",external_ids" : "") + "&include_image_language=null," + Ui.language.replaceAll("-.*", "") + ",en");
         p.title = title(p, o);
+        p.overview = o.optString("overview", "").trim();
         String poster = o.optString("poster_path", "");
         if (!poster.isEmpty() && !"null".equals(poster)) p.poster = poster;
         String best = bestBackdrop(o.optJSONObject("images"));
@@ -1170,7 +1224,7 @@ final class Recs {
     private boolean linksOn() {
         String key = watchmodeKey();
         return !key.isEmpty() && cache.getInt("wm:refused", 0) != key.hashCode() && (Prefs.topContent().equals(Prefs.TOP_PICKS) || Prefs.topContent().equals(Prefs.TOP_BOTH)
-                || Prefs.topContent().equals(Prefs.TOP_ROWS));
+                || Prefs.topContent().equals(Prefs.TOP_ROWS) || Prefs.topContent().equals(Prefs.TOP_SHOWCASE));
     }
 
     /** Sets p.link from what was looked up before, or looks it up (2 requests of the free plan's 2,500 a month). */
@@ -1469,7 +1523,7 @@ final class Recs {
             for (Pick p : picks) {
                 a.put(new JSONObject().put("id", p.id).put("kind", p.kind).put("title", p.title).put("backdrop", p.backdrop)
                         .put("poster", p.poster == null ? "" : p.poster).put("link", p.link == null ? "" : p.link)
-                        .put("meta", p.meta).put("app", p.app == null ? "" : p.app).put("pkg", p.pkg == null ? "" : p.pkg)
+                        .put("meta", p.meta).put("overview", p.overview).put("app", p.app == null ? "" : p.app).put("pkg", p.pkg == null ? "" : p.pkg)
                         .put("servicePkg", p.servicePkg == null ? "" : p.servicePkg)
                         .put("tag", p.tag == null ? "" : p.tag).put("mine", p.mine).put("detailed", p.detailed));
             }
@@ -1499,6 +1553,7 @@ final class Recs {
             p.poster = o.optString("poster");
             p.link = o.optString("link").isEmpty() ? null : o.optString("link");
             p.meta = o.optString("meta");
+            p.overview = o.optString("overview");
             p.app = o.optString("app").isEmpty() ? null : o.optString("app");
             p.pkg = o.optString("pkg").isEmpty() ? null : o.optString("pkg");
             p.servicePkg = o.optString("servicePkg").isEmpty() ? null : o.optString("servicePkg");

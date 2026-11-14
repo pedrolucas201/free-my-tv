@@ -882,6 +882,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     @Override public void onRecs() {
         wake();
         updatePicks();
+        updateShowcase();
     }
 
     private void invalidateAll() {
@@ -980,6 +981,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         lEyebrow.setLetterSpacing(0.2f);
         headTitle = null;   // measured again at this size
         lIslandTitle = Ui.text(Ui.semibold, 22 * k, L_INK);
+        lSynopsis = Ui.text(Ui.regular, 26 * k, L_DIM);
         lIslandSub = Ui.text(Ui.medium, 16 * k, L_DIM);
         lTab = Ui.text(Ui.medium, 30 * k, L_DIM);
         lTabOn = Ui.text(Ui.semibold, 30 * k, L_INK);
@@ -1406,7 +1408,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** Day or night right now (from the sun at your location); `animate`: with the transition. */
     private void checkNight(boolean animate) {
-        boolean want = data.isNight(System.currentTimeMillis());
+        boolean want = data.isNight(System.currentTimeMillis()) || showcaseMode();   // light text over the photo
         int[] f = FLAT.get(Prefs.theme());
         if (f != flat) {   // dark ⇄ a flat theme keeps the night value: only the background, glass and text change
             flat = f;
@@ -1494,6 +1496,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             lHead.setColor(lTitle.getColor());
             lEyebrow.setColor(flat != null ? tone(L_DIM, flat[F_ACCENT]) : tone(L_DIM, 0xFF98989D));
             lIslandTitle.setColor(lTitle.getColor());
+            lSynopsis.setColor(Ui.alpha(lTitle.getColor(), 0.78f));
             lIslandSub.setColor(flat != null ? tone(L_DIM, flat[F_DIM]) : tone(L_DIM, 0xFF98989D));
         }
         if (continueMode()) applyWatchContrast();
@@ -2518,6 +2521,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         heroChanged |= aim(cardFocus, !sheetOpen && zone == Z_CARDS ? cardIndex : -1, snap) | topChanged;
         heroChanged |= aim(cardOpen, cardIndex, snap);
         updateHeadline();
+        updateShowcase();
         float scrollTo = Math.max(0, cardIndex - 2);
         heroChanged |= cardScroll.target != scrollTo;
         cardScroll.target = scrollTo;
@@ -2530,7 +2534,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         updateTint();
         // The row scrolls so the focused card is at most the third one on screen, and stops with the last card at the
         // right edge (3 fit on its own top, 5 when it's drawn smaller under the picks).
-        float watchTo = Math.max(0, Math.min(watchIndex - 2, watching.size() - (rowsMode() ? 5 : 3)));
+        float watchTo = Math.max(0, Math.min(watchIndex - 2, watching.size() - (watchSmall() ? 5 : 3)));
         if (watchScroll.target != watchTo || snap) {
             heroChanged = true;
             if (snap) watchScroll.snap(watchTo); else watchScroll.target = watchTo;
@@ -2827,8 +2831,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             // Only read when it's shown: with the picks or the clock, Continue Watching costs nothing.
             final String mode = Prefs.topContent();
             final boolean allowed = WatchNext.allowed(c);
-            final List<WatchNext.Item> w = mode.equals(Prefs.TOP_CONTINUE) || mode.equals(Prefs.TOP_BOTH) || mode.equals(Prefs.TOP_ROWS)
-                    ? WatchNext.load(c) : new ArrayList<>();
+            final List<WatchNext.Item> w = Prefs.continueShown() ? WatchNext.load(c) : new ArrayList<>();
             handler.post(() -> {
                 // A provider/package refresh must not cancel a drag or undo a move that was just saved.
                 boolean keepOrder = reordering || pendingOrderSaves > 0 || orderAtLoad != orderRevision;
@@ -3980,7 +3983,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
      */
     private final Runnable bgFollow = new Runnable() {
         @Override public void run() {
-            if (!running || !picksMode() || cards.isEmpty()) return;
+            // The showcase's photo covers the background: no fade under it (each of its frames redrew the full photo).
+            if (!running || !picksMode() || cards.isEmpty() || showcaseMode()) return;
             Backdrop b = recs.backdrop(cards.get(Math.min(cardIndex, cards.size() - 1)));
             // Not built yet (updateCards shows it when it is), or already there: nothing to fade, no frame to draw
             if (b == null || b == bgTo) return;
@@ -4156,7 +4160,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** The cards side by side: the one at cardIndex wide, the others tall, sliding as `cardOpen` moves. */
     private void layoutCards() {
-        float top = L_CARDS_TOP * k, ch = (rowsMode() ? L_ROWS_CARD_H : L_CARD_H) * k, g = L_CARD_GAP * k, tall = L_TALL_W * k;
+        float top = (showcaseMode() ? L_SHOW_CARDS_TOP : L_CARDS_TOP) * k, g = L_CARD_GAP * k, tall = L_TALL_W * k;
+        float ch = (rowsMode() ? L_ROWS_CARD_H : showcaseMode() ? L_SHOW_CARD_H : L_CARD_H) * k;
         float wide = (CONTENT_R - MARGIN) * k - 2 * tall - 2 * g, x = MARGIN * k - cardScroll.value * (tall + g);
         for (int i = 0; i < Recs.MAX_CARDS; i++) {
             float w = Math.max(tall * 0.5f, tall + (wide - tall) * cardOpen[i].value);
@@ -4212,12 +4217,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** Picks need a TMDB key: without one, "picks" shows the clock, like "nothing". */
     private boolean picksMode() {
-        return (topMode.equals(Prefs.TOP_PICKS) || topMode.equals(Prefs.TOP_BOTH) || topMode.equals(Prefs.TOP_ROWS)) && picksOn();
+        return (topMode.equals(Prefs.TOP_PICKS) || topMode.equals(Prefs.TOP_BOTH) || topMode.equals(Prefs.TOP_ROWS)
+                || topMode.equals(Prefs.TOP_SHOWCASE)) && picksOn();
     }
 
     /** The picks with Continue Watching as their second tab (Settings > Top of the screen). */
     private boolean bothMode() {
-        return topMode.equals(Prefs.TOP_BOTH) && picksOn();
+        return (topMode.equals(Prefs.TOP_BOTH) || topMode.equals(Prefs.TOP_SHOWCASE)) && picksOn();
     }
 
     private static final int CONTINUE_TAB = 1;
@@ -4256,7 +4262,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         boolean modeChanged = !mode.equals(topMode);
         boolean listChanged = !sameWatching(list, watching);
         // The permission (granted or taken back) and the first read change what an empty row says: redraw for those.
-        boolean shown = mode.equals(Prefs.TOP_CONTINUE) || mode.equals(Prefs.TOP_BOTH) || mode.equals(Prefs.TOP_ROWS);
+        boolean shown = mode.equals(Prefs.TOP_CONTINUE) || mode.equals(Prefs.TOP_BOTH) || mode.equals(Prefs.TOP_ROWS)
+                || mode.equals(Prefs.TOP_SHOWCASE);
         boolean textChanged = allowed != watchAllowed || !watchLoaded && shown;
         watchAllowed = allowed;
         if (shown) watchLoaded = true;
@@ -4267,6 +4274,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         topMode = mode;
         if (modeChanged) {
             closeMenu(false);
+            if (!mode.equals(Prefs.TOP_SHOWCASE)) recs.dropShowcase();
+            showPhoto = null;
             tab = 0;   // the tabs differ between the modes (Continue is the second in one of them)
             cardIndex = 0;
         }
@@ -4750,6 +4759,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
      * the same photo almost black (or a dark gradient), drawn on top during the transition.
      */
     private void drawLightSky(Canvas c) {
+        if (showPhoto != null && showcaseMode() && !watchTab()) {
+            // ponytail: the photo swaps without a fade; a cross-fade if the cut looks abrupt on the TV.
+            drawImage(c, showPhoto, 1);
+            return;
+        }
         if (flat != null) {
             c.drawColor(flat[F_BG]);
             return;
@@ -4895,7 +4909,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             c.drawText(tabs()[i], r.centerX() - p.measureText(tabs()[i]) / 2, r.centerY() + Ui.halfCap(p), p);
         }
         if (watchTab()) {   // the Continue tab: what you were watching where the cards are
-            drawWatchRow(c);
+            if (showcaseMode()) drawWatchUnder(c); else drawWatchRow(c);
             if (HomeData.coinCount() > 0) drawQuotes(c);
             return;
         }
@@ -5039,6 +5053,70 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
     }
 
+    // MARK: - Showcase (Settings > Top of the screen): the focused pick's photo full screen, its title and synopsis over
+    // it, the row lower and shorter; the tabs pick the row (Continue's too)
+
+    private static final float L_SHOW_CARDS_TOP = 540, L_SHOW_CARD_H = 200, L_SYNOPSIS_BASE = 292, SYNOPSIS_W = 1060;
+    private Bitmap showPhoto;            // the photo on screen (one of Recs' three)
+    private String synopsis1 = "", synopsis2 = "";
+    private Paint lSynopsis;
+
+    private boolean showcaseMode() {
+        return topMode.equals(Prefs.TOP_SHOWCASE) && picksOn();
+    }
+
+    /** Continue Watching's row drawn smaller, under something else (the picks in rows mode, the showcase's photo). */
+    private boolean watchSmall() {
+        return rowsMode() || showcaseMode() && watchTab();
+    }
+
+    /** The focused pick's photo and its neighbours' (Recs keeps three): from retarget and onRecs, not while drawing. */
+    private void updateShowcase() {
+        if (!showcaseMode() || watchTab() || cards.isEmpty()) {
+            if (showPhoto != null) {
+                showPhoto = null;
+                sky.invalidate();
+            }
+            return;
+        }
+        int i = Math.min(cardIndex, cards.size() - 1);
+        Bitmap b = recs.showcase(cards.get(i));
+        if (i + 1 < cards.size()) recs.showcase(cards.get(i + 1));
+        if (i > 0) recs.showcase(cards.get(i - 1));
+        if (b != null && b != showPhoto) {
+            showPhoto = b;
+            sky.invalidate();
+        }
+    }
+
+    /** The synopsis in at most two lines under the tabs, the second cut with "…"; once per pick, from updateHeadline. */
+    private void fitSynopsis(String text) {
+        synopsis1 = synopsis2 = "";
+        if (lSynopsis == null || text == null || text.isEmpty() || !showcaseMode()) return;
+        float room = SYNOPSIS_W * k;
+        int n = lSynopsis.breakText(text, true, room, null);
+        if (n < text.length()) {   // break at the last space that fits
+            int space = text.lastIndexOf(' ', n);
+            if (space > 0) n = space;
+        }
+        synopsis1 = text.substring(0, n).trim();
+        String rest = text.substring(n).trim();
+        if (!rest.isEmpty()) {
+            fitPaint.set(lSynopsis);
+            synopsis2 = TextUtils.ellipsize(rest, fitPaint, room, TextUtils.TruncateAt.END).toString();
+        }
+    }
+
+    private void drawSynopsis(Canvas c) {
+        if (synopsis1.isEmpty()) return;
+        int ink = lSynopsis.getColor();
+        lSynopsis.setColor(Ui.alpha(ink, Ui.clamp(headFade.value) * Ui.clamp(headOn.value)));
+        float x = MARGIN * k, line = 40 * k;
+        c.drawText(synopsis1, x, L_SYNOPSIS_BASE * k, lSynopsis);
+        if (!synopsis2.isEmpty()) c.drawText(synopsis2, x, L_SYNOPSIS_BASE * k + line, lSynopsis);
+        lSynopsis.setColor(ink);
+    }
+
     // MARK: - Headline: the focused pick's title, big and light, where "For You" was (with its kind and genre above)
 
     private static final float L_HEAD_BASE = 140, L_EYEBROW_BASE = 62, HEAD_SIZE = 88, HEAD_MIN = 56;
@@ -5078,6 +5156,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         String lead = Ui.tr("For You");
         headEyebrow = (parts.length >= 3 ? lead + " · " + parts[0] + " · " + parts[1] : lead).toUpperCase(Ui.locale());
         // Under the wide card, only what the eyebrow doesn't say (the seasons, the service).
+        fitSynopsis(p.overview);
         headCaption = parts.length >= 3 ? android.text.TextUtils.join(" · ", java.util.Arrays.copyOfRange(parts, 2, parts.length)) : p.meta;
         float room = headRoom();
         lHead.setTextSize(HEAD_SIZE * k);
@@ -5111,6 +5190,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         c.drawText(headShown, x - Ui.leftBearing(lHead, headShown), (L_HEAD_BASE + 10 * (1 - f)) * k, lHead);
         lHead.setColor(ink);
         titleRight = x + lHead.measureText(headShown);
+        if (showcaseMode()) drawSynopsis(c);
     }
 
     private boolean picksOn() {
@@ -5220,7 +5300,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         // The cards peeking in at the sides show only their image: their text would start off screen.
         if (p == null || base.left < 0 || base.left > (CONTENT_R - 100) * k) return;
-        if (rowsMode()) {   // one line under the shorter card: the title, then (as it widens) the details beside it
+        if (rowsMode() || showcaseMode()) {   // one line under the shorter card: the title, then (as it widens) the details beside it
             fitPaint.set(lCardTitle);
             // With the headline on top, the wide card shows only its details (its title is up there).
             String t = headlineMode() && open > 0.5f ? "" : TextUtils.ellipsize(p.title, fitPaint, bw, TextUtils.TruncateAt.END).toString();

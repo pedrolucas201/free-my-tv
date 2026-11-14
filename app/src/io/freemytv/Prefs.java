@@ -322,19 +322,20 @@ final class Prefs {
 
     /** TOP_BOTH: the picks, with Continue Watching as their second tab (Explore, Continue, Movies, Shows); TOP_ROWS: the
      *  picks, shorter, with Continue Watching as a smaller row under them. */
-    static final String TOP_PICKS = "picks", TOP_CONTINUE = "continue", TOP_NONE = "none", TOP_BOTH = "both", TOP_ROWS = "rows";
-    static final String[] TOP_CONTENT = {TOP_PICKS, TOP_BOTH, TOP_ROWS, TOP_CONTINUE, TOP_NONE};
+    static final String TOP_PICKS = "picks", TOP_CONTINUE = "continue", TOP_NONE = "none", TOP_BOTH = "both", TOP_ROWS = "rows",
+            TOP_SHOWCASE = "showcase";   // the focused pick's photo full screen, the tabs (Continue's too) choosing the row
+    static final String[] TOP_CONTENT = {TOP_PICKS, TOP_BOTH, TOP_SHOWCASE, TOP_ROWS, TOP_CONTINUE, TOP_NONE};
 
     /** What the cards under the title show: the recommendations (TMDB), what you were watching in your apps, or nothing. */
     static String topContent() {
         String v = sp().getString("topContent", TOP_PICKS);
-        return v.equals(TOP_CONTINUE) || v.equals(TOP_NONE) || v.equals(TOP_BOTH) || v.equals(TOP_ROWS) ? v : TOP_PICKS;
+        return v.equals(TOP_CONTINUE) || v.equals(TOP_NONE) || v.equals(TOP_BOTH) || v.equals(TOP_ROWS) || v.equals(TOP_SHOWCASE) ? v : TOP_PICKS;
     }
 
     /** Continue Watching is on the home screen (its own top, or the picks' tab): read it, ask for its permission. */
     static boolean continueShown() {
         String v = topContent();
-        return v.equals(TOP_CONTINUE) || v.equals(TOP_BOTH) || v.equals(TOP_ROWS);
+        return v.equals(TOP_CONTINUE) || v.equals(TOP_BOTH) || v.equals(TOP_ROWS) || v.equals(TOP_SHOWCASE);
     }
 
     static void setTopContent(String v) { put("topContent", v); }
