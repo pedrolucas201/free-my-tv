@@ -196,6 +196,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (lTab == null) return;
         boolean mono = flat != null && flat[F_MONO] == 1;
         lTab.setTypeface(mono ? Ui.mono : Ui.medium);
+        if (lEyebrow != null) lEyebrow.setTypeface(mono ? Ui.mono : Ui.medium);
         lTabOn.setTypeface(mono ? Ui.monoSemibold : Ui.semibold);
         lCardMeta.setTypeface(mono ? Ui.mono : Ui.medium);
         lQuote.setTypeface(mono ? Ui.mono : Ui.regular);
@@ -972,6 +973,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         for (Paint p : new Paint[] {labelPaint, titlePaint, metaPaint, clockPaint}) p.setShadowLayer(22 * k, 0, 2 * k, 0x59000000);
         lTitle = Ui.text(Ui.displaySemibold, 76 * k, L_INK);
         lTitle.setLetterSpacing(0.004f);
+        lHead = Ui.text(Ui.light, HEAD_SIZE * k, L_INK);
+        lHead.setLetterSpacing(-0.02f);
+        lEyebrow = Ui.text(Ui.medium, 17 * k, L_DIM);
+        lEyebrow.setLetterSpacing(0.2f);
+        headTitle = null;   // measured again at this size
         lTab = Ui.text(Ui.medium, 30 * k, L_DIM);
         lTabOn = Ui.text(Ui.semibold, 30 * k, L_INK);
         lCardTitle = Ui.text(Ui.semibold, 31 * k, L_INK);
@@ -1056,7 +1062,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         boolean statusMoving = step(statusFocus, dt);
         boolean heroMoving = heroFocus.step(dt);
         boolean topMoving = step(topFocus, dt) | topReorderFrame, cardsMoving = step(cardFocus, dt) | step(cardOpen, dt) | cardScroll.step(dt)
-                | step(watchFocus, dt) | watchScroll.step(dt);
+                | step(watchFocus, dt) | watchScroll.step(dt) | headFade.step(dt) | headOn.step(dt);
         boolean tintMoving = tintMix.step(dt);
         if (tintMoving) {
             sky.invalidate();
@@ -1481,6 +1487,10 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         lWeather.setColor(tone(L_DIM, dim));
         lClockQuote.setColor(tone(L_DIM, dim));
         staleQuote.setColor(tone(L_FAINT, flat != null ? Ui.alpha(flat[2], 0.6f) : 0x99FFFFFF));
+        if (lHead != null) {
+            lHead.setColor(lTitle.getColor());
+            lEyebrow.setColor(flat != null ? tone(L_DIM, flat[F_ACCENT]) : tone(L_DIM, 0xFF98989D));
+        }
         if (continueMode()) applyWatchContrast();
     }
 
@@ -2523,6 +2533,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         boolean topChanged = aim(topFocus, !sheetOpen && zone == Z_TOP ? topIndex : -1, snap);
         heroChanged |= aim(cardFocus, !sheetOpen && zone == Z_CARDS ? cardIndex : -1, snap) | topChanged;
         heroChanged |= aim(cardOpen, cardIndex, snap);
+        updateHeadline();
         float scrollTo = Math.max(0, cardIndex - 2);
         heroChanged |= cardScroll.target != scrollTo;
         cardScroll.target = scrollTo;
@@ -4201,6 +4212,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (b != null || (cards.isEmpty() && !own)) showBackdrop(b);
         heroDirty = true;
         spoken.focusMoved();    // new picks under the focused card
+        updateHeadline();
     }
 
     /** Your photo's background is ready (or new photos came in): draw it. */
@@ -4855,9 +4867,13 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             if (HomeData.coinCount() > 0 || playingTab != null) drawQuotes(c);
             return;
         }
-        String hello = picksMode() ? Ui.tr("For You") : Ui.tr("Continue Watching");
-        c.drawText(hello, MARGIN * k - Ui.leftBearing(lTitle, hello), L_TITLE_BASE * k, lTitle);
-        titleRight = MARGIN * k + lTitle.measureText(hello);
+        if (headlineMode() && headShown != null) {
+            drawHeadline(c);
+        } else {
+            String hello = picksMode() ? Ui.tr("For You") : Ui.tr("Continue Watching");
+            c.drawText(hello, MARGIN * k - Ui.leftBearing(lTitle, hello), L_TITLE_BASE * k, lTitle);
+            titleRight = MARGIN * k + lTitle.measureText(hello);
+        }
         if (!picksMode()) {
             if (continueMode()) drawWatchRow(c);
             if (HomeData.coinCount() > 0 || playingTab != null) drawQuotes(c);
@@ -4901,6 +4917,80 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         for (int i = 0; i < slots; i++) if (i != top) drawLightCard(c, i);
         if (top >= 0) drawLightCard(c, top);
         if (HomeData.coinCount() > 0 || playingTab != null) drawQuotes(c);
+    }
+
+    // MARK: - Headline: the focused pick's title, big and light, where "For You" was (with its kind and genre above)
+
+    private static final float L_HEAD_BASE = 140, L_EYEBROW_BASE = 62, HEAD_SIZE = 88, HEAD_MIN = 56;
+    private final Spring headFade = new Spring(0.3f, 1f, 1), headOn = new Spring(0.35f, 1f, 1);
+    private Paint lHead, lEyebrow;
+    private String headTitle, headShown, headPrevShown, headEyebrow, headCaption;
+    private float headSize = HEAD_SIZE, headPrevSize = HEAD_SIZE;
+    private int headGeneration = -1;
+
+    /** The picks' cards are on screen: the headline replaces "For You". */
+    private boolean headlineMode() {
+        return picksMode() && !watchTab() && !cards.isEmpty();
+    }
+
+    /** Where the headline must end: before the round buttons (it gets smaller first, then is cut with "…"). */
+    private float headRoom() {
+        float right = lightButtons.isEmpty() ? CONTENT_R * k : topRects[nTabs()].left;
+        return right - 48 * k - MARGIN * k;
+    }
+
+    /**
+     * Follows the focused pick (from retarget and updateCards, not while drawing): a new title is measured and fitted
+     * here and cross-fades in; away from the picks (on the shelf) the headline dims instead of going away.
+     */
+    private void updateHeadline() {
+        if (lHead == null) return;
+        headOn.target = !sheetOpen && (zone == Z_CARDS || zone == Z_TOP) ? 1 : 0.45f;
+        Recs.Pick p = cards.isEmpty() ? null : cards.get(Math.min(cardIndex, cards.size() - 1));
+        if (p == null || p.title == null || p.title.equals(headTitle) && headGeneration == Ui.generation) return;
+        boolean first = headTitle == null;
+        headPrevShown = headShown;
+        headPrevSize = headSize;
+        headTitle = p.title;
+        headGeneration = Ui.generation;
+        // "FOR YOU · SHOW · CRIME": the pick's first two details (its kind and genre) above the title.
+        String[] parts = p.meta == null ? new String[0] : p.meta.split(" · ");
+        String lead = Ui.tr("For You");
+        headEyebrow = (parts.length >= 3 ? lead + " · " + parts[0] + " · " + parts[1] : lead).toUpperCase(Ui.locale());
+        // Under the wide card, only what the eyebrow doesn't say (the seasons, the service).
+        headCaption = parts.length >= 3 ? android.text.TextUtils.join(" · ", java.util.Arrays.copyOfRange(parts, 2, parts.length)) : p.meta;
+        float room = headRoom();
+        lHead.setTextSize(HEAD_SIZE * k);
+        float tw = lHead.measureText(p.title);
+        headSize = tw <= room ? HEAD_SIZE : Math.max(HEAD_MIN, HEAD_SIZE * room / tw);
+        lHead.setTextSize(headSize * k);
+        headShown = TextUtils.ellipsize(p.title, new android.text.TextPaint(lHead), room, TextUtils.TruncateAt.END).toString();
+        if (first) {
+            headFade.snap(1);
+        } else {
+            headFade.snap(0);
+            headFade.target = 1;
+        }
+        heroDirty = true;
+    }
+
+    private void drawHeadline(Canvas c) {
+        if (headGeneration != Ui.generation) updateHeadline();   // a new language: its words above the title
+        float x = MARGIN * k, on = Ui.clamp(headOn.value), f = Ui.clamp(headFade.value);
+        int ink = lHead.getColor(), eye = lEyebrow.getColor();
+        lEyebrow.setColor(Ui.alpha(eye, on));
+        c.drawText(headEyebrow, x, L_EYEBROW_BASE * k, lEyebrow);
+        lEyebrow.setColor(eye);
+        if (headPrevShown != null && f < 0.99f) {   // the last title leaves upward as the new one rises in
+            lHead.setTextSize(headPrevSize * k);
+            lHead.setColor(Ui.alpha(ink, (1 - f) * on));
+            c.drawText(headPrevShown, x - Ui.leftBearing(lHead, headPrevShown), (L_HEAD_BASE - 8 * f) * k, lHead);
+        }
+        lHead.setTextSize(headSize * k);
+        lHead.setColor(Ui.alpha(ink, f * on));
+        c.drawText(headShown, x - Ui.leftBearing(lHead, headShown), (L_HEAD_BASE + 10 * (1 - f)) * k, lHead);
+        lHead.setColor(ink);
+        titleRight = x + lHead.measureText(headShown);
     }
 
     private boolean picksOn() {
@@ -5011,25 +5101,37 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (p == null || base.left < 0 || base.left > (CONTENT_R - 100) * k) return;
         if (rowsMode()) {   // one line under the shorter card: the title, then (as it widens) the details beside it
             fitPaint.set(lCardTitle);
-            String t = TextUtils.ellipsize(p.title, fitPaint, bw, TextUtils.TruncateAt.END).toString();
-            float line = base.bottom + 40 * k, x = base.left + lCardTitle.measureText(t) + 24 * k;
-            c.drawText(t, base.left, line, lCardTitle);
+            // With the headline on top, the wide card shows only its details (its title is up there).
+            String t = headlineMode() && open > 0.5f ? "" : TextUtils.ellipsize(p.title, fitPaint, bw, TextUtils.TruncateAt.END).toString();
+            float line = base.bottom + 40 * k, x = t.isEmpty() ? base.left : base.left + lCardTitle.measureText(t) + 24 * k;
+            if (!t.isEmpty()) c.drawText(t, base.left, line, lCardTitle);
             if (open > 0.02f && p.meta != null && !p.meta.isEmpty() && base.right - x > 60 * k) {
                 fitPaint.set(lCardMeta);
                 int a = lCardMeta.getAlpha();
                 lCardMeta.setAlpha(Math.round(a * open));
-                c.drawText(TextUtils.ellipsize(p.meta, fitPaint, base.right - x, TextUtils.TruncateAt.END).toString(), x, line, lCardMeta);
+                String meta = t.isEmpty() && i == cardIndex && headCaption != null ? headCaption : p.meta;
+                c.drawText(TextUtils.ellipsize(meta, fitPaint, base.right - x, TextUtils.TruncateAt.END).toString(), x, line, lCardMeta);
                 lCardMeta.setAlpha(a);
             }
             return;
         }
-        fitPaint.set(lCardTitle);
-        c.drawText(TextUtils.ellipsize(p.title, fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left, base.bottom + 46 * k, lCardTitle);
+        // With the headline on top, the wide card's title is already there: as a card widens its title fades out and its
+        // details take that line.
+        boolean head = headlineMode();
+        if (!head || open < 0.98f) {
+            fitPaint.set(lCardTitle);
+            int a = lCardTitle.getAlpha();
+            if (head) lCardTitle.setAlpha(Math.round(a * (1 - open)));
+            c.drawText(TextUtils.ellipsize(p.title, fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left, base.bottom + 46 * k, lCardTitle);
+            lCardTitle.setAlpha(a);
+        }
         if (open > 0.02f && p.meta != null && !p.meta.isEmpty()) {
             fitPaint.set(lCardMeta);
             int a = lCardMeta.getAlpha();
             lCardMeta.setAlpha(Math.round(a * open));
-            c.drawText(TextUtils.ellipsize(p.meta, fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left, base.bottom + 80 * k, lCardMeta);
+            String meta = head && i == cardIndex && headCaption != null ? headCaption : p.meta;
+            c.drawText(TextUtils.ellipsize(meta, fitPaint, bw, TextUtils.TruncateAt.END).toString(), base.left,
+                    base.bottom + (head ? 46 : 80) * k, lCardMeta);
             lCardMeta.setAlpha(a);
         }
         // A narrow card shows only its title: why it's there (Trakt's "Up next: S2 E5") goes under it, fading into the
@@ -5101,6 +5203,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     /** Wi-Fi/Ethernet, Bluetooth (when something is connected) and a USB drive, at the top left. */
     private void drawStatusIcons(Canvas c) {
         if (!Prefs.statusIcons()) return;
+        // ponytail: hidden under the headline (they'd sit on its big title); a place of their own if anyone uses both.
+        if (headlineMode()) return;
         float height = L_STATUS * k, gap = L_STATUS_GAP * k;
         int color = Ui.alpha(tone(L_INK, 0xEBFFFFFF), 0.85f);
         float x = MARGIN * k;
