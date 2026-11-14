@@ -197,6 +197,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         boolean mono = flat != null && flat[F_MONO] == 1;
         lTab.setTypeface(mono ? Ui.mono : Ui.medium);
         if (lEyebrow != null) lEyebrow.setTypeface(mono ? Ui.mono : Ui.medium);
+        if (lIslandSub != null) lIslandSub.setTypeface(mono ? Ui.mono : Ui.medium);
         lTabOn.setTypeface(mono ? Ui.monoSemibold : Ui.semibold);
         lCardMeta.setTypeface(mono ? Ui.mono : Ui.medium);
         lQuote.setTypeface(mono ? Ui.mono : Ui.regular);
@@ -978,6 +979,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         lEyebrow = Ui.text(Ui.medium, 17 * k, L_DIM);
         lEyebrow.setLetterSpacing(0.2f);
         headTitle = null;   // measured again at this size
+        lIslandTitle = Ui.text(Ui.semibold, 22 * k, L_INK);
+        lIslandSub = Ui.text(Ui.medium, 16 * k, L_DIM);
         lTab = Ui.text(Ui.medium, 30 * k, L_DIM);
         lTabOn = Ui.text(Ui.semibold, 30 * k, L_INK);
         lCardTitle = Ui.text(Ui.semibold, 31 * k, L_INK);
@@ -1062,7 +1065,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         boolean statusMoving = step(statusFocus, dt);
         boolean heroMoving = heroFocus.step(dt);
         boolean topMoving = step(topFocus, dt) | topReorderFrame, cardsMoving = step(cardFocus, dt) | step(cardOpen, dt) | cardScroll.step(dt)
-                | step(watchFocus, dt) | watchScroll.step(dt) | headFade.step(dt) | headOn.step(dt);
+                | step(watchFocus, dt) | watchScroll.step(dt) | headFade.step(dt) | headOn.step(dt) | islandFocus.step(dt);
         boolean tintMoving = tintMix.step(dt);
         if (tintMoving) {
             sky.invalidate();
@@ -1490,6 +1493,8 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (lHead != null) {
             lHead.setColor(lTitle.getColor());
             lEyebrow.setColor(flat != null ? tone(L_DIM, flat[F_ACCENT]) : tone(L_DIM, 0xFF98989D));
+            lIslandTitle.setColor(lTitle.getColor());
+            lIslandSub.setColor(flat != null ? tone(L_DIM, flat[F_DIM]) : tone(L_DIM, 0xFF98989D));
         }
         if (continueMode()) applyWatchContrast();
     }
@@ -1803,10 +1808,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     }
 
     private Quotes quotes;
-    // What's playing, cut to fit the tab row and the clock's row: once per title, never while drawing.
-    private String playingTab, playingClock;
-    private float playingTabWidth, playingTabCap, playingClockCap;
-    private final RectF barRect = new RectF();
+    private final RectF barRect = new RectF();   // the island's level bars
     // The bars bounce for a few seconds when the title changes, then stand still: bouncing all along redrew the top
     // layer 10 times a second (~8% of a core on a Skyworth's Cortex-A55), the still screen nothing.
     private static final long BAR_FRAME_MS = 100, BARS_BOUNCE_MS = 3000;
@@ -1814,7 +1816,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
     private String shownTitle;   // kept while the screen is hidden: showing it again with the same title is no change
     private final Runnable bars = new Runnable() {
         @Override public void run() {
-            if (!running || playingTab == null) return;
+            if (!running || islandTitle == null) return;
             heroDirty = true;
             wake();
             if (SystemClock.uptimeMillis() < barsUntil) handler.postDelayed(this, BAR_FRAME_MS);
@@ -1823,20 +1825,25 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private void bounceBars() {
         handler.removeCallbacks(bars);
-        if (playingTab == null) return;
+        if (islandTitle == null) return;
         barsUntil = SystemClock.uptimeMillis() + BARS_BOUNCE_MS;
         handler.post(bars);
     }
 
     /** What's playing changed (or stopped). */
     private void onPlaying() {
-        fitPlaying();
+        fitIsland();
+        if (zone == Z_ISLAND && !islandShown()) {   // it stopped while the island had the focus: the buttons next to it
+            zone = lightButtons.isEmpty() ? Z_SHELF : Z_TOP;
+            topIndex = nTabs();
+            retarget(false);
+        }
         heroDirty = true;
         wake();
         // Only a new title bounces the bars and is said to TalkBack: not a subtitle some players rewrite every second (the
         // time), and not the same title again when the screen shows.
         String title = playing.title, now = playing.text;
-        if (title != null && now != null && running && playingTab != null && !title.equals(shownTitle)) {
+        if (title != null && now != null && running && islandTitle != null && !title.equals(shownTitle)) {
             shownTitle = title;
             bounceBars();
             if (readerOn()) announceForAccessibility(Ui.trf("Now playing: {what}", "what", now.replace(" · ", ", ")));
@@ -1853,21 +1860,6 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                 && !am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_SPOKEN).isEmpty();
     }
 
-    private void fitPlaying() {
-        String now = playing.text;
-        if (now == null || lQuote == null) {
-            playingTab = playingClock = null;
-            return;
-        }
-        fitPaint.set(lQuote);
-        playingTab = TextUtils.ellipsize(now, fitPaint, 640 * k, TextUtils.TruncateAt.END).toString();
-        playingTabWidth = lQuote.measureText(playingTab);
-        playingTabCap = Ui.cap(lQuote);
-        playingClockCap = Ui.cap(lClockQuote);
-        fitPaint.set(lClockQuote);
-        playingClock = TextUtils.ellipsize(now, fitPaint, (CONTENT_R - MARGIN - 60) * k, TextUtils.TruncateAt.END).toString();
-    }
-
     /** Coin logo + price in the configured currency, in a row at the right end of the tab bar. */
     private void drawQuotes(Canvas c) {
         boolean clock = clockMode();
@@ -1881,17 +1873,6 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (fade <= 0.01f) return;
         int textColor = text.getColor();
         text.setColor(Ui.alpha(textColor, fade));
-        // What an app is playing takes the quotes' place while it plays.
-        String line = clock ? playingClock : playingTab;
-        if (line != null) {
-            float cap = clock ? playingClockCap : playingTabCap, gap = cap * 0.6f;
-            float base = clock ? L_QUOTES_BASE * k : (L_TABBAR_TOP + L_TABBAR_H / 2) * k + cap / 2;
-            float x = clock ? MARGIN * k : right - playingTabWidth - gap - NowPlaying.barsWidth(cap);
-            NowPlaying.drawBars(c, x, base, cap, text, SystemClock.uptimeMillis() < barsUntil, barRect);
-            c.drawText(line, x + NowPlaying.barsWidth(cap) + gap, base, text);
-            text.setColor(textColor);
-            return;
-        }
         // One read of the list, so n always matches the coins drawn below.
         int[] coins = HomeData.active();
         int n = coins.length;
@@ -2531,6 +2512,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         heroFocus.target = !sheetOpen && zone == Z_HERO ? 1 : 0;
         if (snap) heroFocus.snap(heroFocus.target);
         boolean topChanged = aim(topFocus, !sheetOpen && zone == Z_TOP ? topIndex : -1, snap);
+        islandFocus.target = !sheetOpen && zone == Z_ISLAND ? 1 : 0;
+        if (snap) islandFocus.snap(islandFocus.target);
+        topChanged |= islandFocus.value != islandFocus.target;
         heroChanged |= aim(cardFocus, !sheetOpen && zone == Z_CARDS ? cardIndex : -1, snap) | topChanged;
         heroChanged |= aim(cardOpen, cardIndex, snap);
         updateHeadline();
@@ -3447,6 +3431,9 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             if (drawerItems.isEmpty()) return;
             it = drawerItems.get(drawerIndex);
             r = drawerRects[drawerIndex];
+        } else if (zone == Z_ISLAND) {
+            openPlaying();
+            return;
         } else if (zone == Z_TOP) {
             if (topIndex < nTabs()) {
                 selectTab(topIndex);
@@ -4164,6 +4151,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         Symbols.warmWeather(getContext(), 40 * k);
         heroDirty = statusDirty = true;
         layoutCards();
+        fitIsland();
     }
 
     /** The cards side by side: the one at cardIndex wide, the others tall, sliding as `cardOpen` moves. */
@@ -4862,10 +4850,11 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     private void drawLightTop(Canvas c) {
         applyTone();
+        drawIsland(c);
         if (clockMode()) {
             titleRight = 0;
             drawClock(c);
-            if (HomeData.coinCount() > 0 || playingTab != null) drawQuotes(c);
+            if (HomeData.coinCount() > 0) drawQuotes(c);
             return;
         }
         if (headlineMode() && headShown != null) {
@@ -4877,7 +4866,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         if (!picksMode()) {
             if (continueMode()) drawWatchRow(c);
-            if (HomeData.coinCount() > 0 || playingTab != null) drawQuotes(c);
+            if (HomeData.coinCount() > 0) drawQuotes(c);
             return;
         }
         // Text tabs (the selected one in bold, in the main text color); with focus on the tabs, the selected one gets
@@ -4907,7 +4896,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
         if (watchTab()) {   // the Continue tab: what you were watching where the cards are
             drawWatchRow(c);
-            if (HomeData.coinCount() > 0 || playingTab != null) drawQuotes(c);
+            if (HomeData.coinCount() > 0) drawQuotes(c);
             return;
         }
         layoutCards();
@@ -4917,7 +4906,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (rowsMode()) drawWatchUnder(c);   // under the cards: a focused card grows over it
         for (int i = 0; i < slots; i++) if (i != top) drawLightCard(c, i);
         if (top >= 0) drawLightCard(c, top);
-        if (HomeData.coinCount() > 0 || playingTab != null) drawQuotes(c);
+        if (HomeData.coinCount() > 0) drawQuotes(c);
     }
 
     // MARK: - Focus halo (from Frame.io's glowing frames): light around the focused card, in the theme's accent
@@ -4942,6 +4931,114 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         }
     }
 
+    // MARK: - Now-playing island (cult-ui's Dynamic Island): what an app plays, beside the round buttons; OK goes back to it
+
+    private static final int Z_ISLAND = 10;
+    private static final float ISLAND_H = 66, ISLAND_MAX_W = 470, ISLAND_ART = 50;
+    private final Spring islandFocus = new Spring(0.3f, 0.85f, 0);
+    private final RectF islandRect = new RectF();
+    private String islandTitle, islandSub = "";
+    private float islandW;
+    private Bitmap islandArt;
+    private BitmapShader islandArtShader;
+    private Paint lIslandTitle, lIslandSub;
+
+    private boolean islandShown() {
+        return !islandRect.isEmpty();
+    }
+
+    /** What's playing, cut to the island once per change (from onPlaying), never while drawing. */
+    private void fitIsland() {
+        String now = playing.text, title = playing.title;
+        if (now == null || lIslandTitle == null) {
+            islandTitle = null;
+            islandArt = null;
+            islandArtShader = null;
+            layoutIsland();
+            return;
+        }
+        if (title == null) title = now;
+        // "Title · Artist · App": the title on the first line, the rest under it.
+        String sub = now.startsWith(title + " · ") ? now.substring(title.length() + 3) : now.equals(title) ? "" : now;
+        Bitmap art = playing.art;
+        if (art != islandArt) {
+            islandArt = art;
+            islandArtShader = art == null ? null : new BitmapShader(art, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+        }
+        float lead = (art != null ? 8 + ISLAND_ART + 14 : 24) * k, trail = 64 * k;   // the bars and the gaps on the right
+        float room = ISLAND_MAX_W * k - lead - trail;
+        fitPaint.set(lIslandTitle);
+        islandTitle = TextUtils.ellipsize(title, fitPaint, room, TextUtils.TruncateAt.END).toString();
+        fitPaint.set(lIslandSub);
+        islandSub = TextUtils.ellipsize(sub, fitPaint, room, TextUtils.TruncateAt.END).toString();
+        islandW = lead + Math.max(lIslandTitle.measureText(islandTitle), lIslandSub.measureText(islandSub)) + trail;
+        layoutIsland();
+    }
+
+    /** Left of the round buttons, at their height; the headline then ends before it. */
+    private void layoutIsland() {
+        if (islandTitle == null) {
+            islandRect.setEmpty();
+        } else {
+            float right = (lightButtons.isEmpty() ? CONTENT_R * k : topRects[nTabs()].left) - 24 * k;
+            float cy = L_BUTTON_CY * k, h = ISLAND_H * k;
+            islandRect.set(right - islandW, cy - h / 2, right, cy + h / 2);
+        }
+        headTitle = null;   // measured again for the room it now has
+        updateHeadline();
+        heroDirty = true;
+    }
+
+    private void drawIsland(Canvas c) {
+        if (islandRect.isEmpty()) return;
+        float f = Ui.clamp(islandFocus.value), s = 1 + 0.04f * f;
+        float cx = islandRect.centerX(), cy = islandRect.centerY();
+        cell.set(cx - islandRect.width() * s / 2, cy - islandRect.height() * s / 2, cx + islandRect.width() * s / 2,
+                cy + islandRect.height() * s / 2);
+        float rr = cell.height() / 2;
+        fill.setShader(null);
+        fill.setColor(flat != null ? blend(flat[F_BG], 0xFF000000, 0.45f) : tone(0xF2FFFFFF, 0xF0141416));
+        c.drawRoundRect(cell, rr, rr, fill);
+        int border = flat != null ? flat[F_BORDER] : tone(0x26000000, 0x33FFFFFF);
+        rim.setShader(null);
+        rim.setColor(blend(border, accent(), f));
+        rim.setStrokeWidth((2 + f) * k);
+        c.drawRoundRect(cell, rr, rr, rim);
+        rim.setStrokeWidth(2.5f * k);
+        float x = cell.left + 8 * k * s;
+        if (islandArtShader != null) {
+            float a = ISLAND_ART * k * s;
+            tmp.set(x, cy - a / 2, x + a, cy + a / 2);
+            roundImage(c, islandArt, islandArtShader, tmp, a / 2);
+            x += a + 14 * k;
+        } else {
+            x += 16 * k;
+        }
+        if (islandSub.isEmpty()) {
+            c.drawText(islandTitle, x, cy + Ui.halfCap(lIslandTitle), lIslandTitle);
+        } else {
+            c.drawText(islandTitle, x, cy - 3 * k, lIslandTitle);
+            c.drawText(islandSub, x, cy + 21 * k, lIslandSub);
+        }
+        float cap = 22 * k;
+        fill.setColor(flat != null ? flat[F_ACCENT] : lIslandTitle.getColor());
+        NowPlaying.drawBars(c, cell.right - 24 * k - NowPlaying.barsWidth(cap), cy + cap / 2, cap, fill,
+                SystemClock.uptimeMillis() < barsUntil, barRect);
+    }
+
+    /** OK on the island: back to the app that plays. */
+    private void openPlaying() {
+        String pkg = playing.pkg;
+        Intent open = pkg == null ? null : HomeApps.launchIntent(activity.getPackageManager(), pkg);
+        if (open == null) return;
+        click.open();
+        try {
+            activity.startActivity(open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+        } catch (RuntimeException e) {
+            AppLog.w("couldn't open " + pkg + ": " + e.getMessage());
+        }
+    }
+
     // MARK: - Headline: the focused pick's title, big and light, where "For You" was (with its kind and genre above)
 
     private static final float L_HEAD_BASE = 140, L_EYEBROW_BASE = 62, HEAD_SIZE = 88, HEAD_MIN = 56;
@@ -4958,7 +5055,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
 
     /** Where the headline must end: before the round buttons (it gets smaller first, then is cut with "…"). */
     private float headRoom() {
-        float right = lightButtons.isEmpty() ? CONTENT_R * k : topRects[nTabs()].left;
+        float right = !islandRect.isEmpty() ? islandRect.left : lightButtons.isEmpty() ? CONTENT_R * k : topRects[nTabs()].left;
         return right - 48 * k - MARGIN * k;
     }
 
@@ -4968,7 +5065,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
      */
     private void updateHeadline() {
         if (lHead == null) return;
-        headOn.target = !sheetOpen && (zone == Z_CARDS || zone == Z_TOP) ? 1 : 0.45f;
+        headOn.target = !sheetOpen && (zone == Z_CARDS || zone == Z_TOP || zone == Z_ISLAND) ? 1 : 0.45f;
         Recs.Pick p = cards.isEmpty() ? null : cards.get(Math.min(cardIndex, cards.size() - 1));
         if (p == null || p.title == null || p.title.equals(headTitle) && headGeneration == Ui.generation) return;
         boolean first = headTitle == null;
@@ -5319,7 +5416,30 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
                     zone = Z_SHELF;
                 }
                 break;
+            case Z_ISLAND:
+                if (dx > 0) {
+                    if (lightButtons.isEmpty()) return true;
+                    zone = Z_TOP;
+                    topIndex = nTabs();
+                } else if (dx < 0) {
+                    if (!picksMode()) return true;
+                    zone = Z_TOP;
+                    topIndex = nTabs() - 1;
+                    selectTab(topIndex);
+                } else if (dy > 0) {   // down as from the row it sits in
+                    zone = Z_TOP;
+                    topIndex = picksMode() ? tab : nTabs();
+                    return moveLight(0, 1);
+                } else {
+                    return true;
+                }
+                break;
             case Z_TOP:
+                // The island sits between the tabs and the round buttons.
+                if (islandShown() && (dx > 0 && topIndex == nTabs() - 1 || dx < 0 && topIndex == nTabs())) {
+                    zone = Z_ISLAND;
+                    break;
+                }
                 if (dx != 0 && !picksMode() && topIndex + dx < nTabs()) return true;   // no tabs to the left
                 if (dy > 0 && !picksMode()) {
                     zone = continueMode() && !watching.isEmpty() ? Z_WATCH : Z_SHELF;

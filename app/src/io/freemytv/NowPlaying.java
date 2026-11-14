@@ -3,6 +3,7 @@ package io.freemytv;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.RectF;
@@ -85,6 +86,9 @@ public class NowPlaying extends NotificationListenerService {
         volatile String text;
         /** The title alone (the app's package when it gives none): the line's other parts can change every second. */
         volatile String title;
+        /** The app that plays (OK on the home screen's island goes back to it), and its picture for the title, small. */
+        volatile String pkg;
+        volatile Bitmap art;
 
         Watch(Context c, Runnable changed) {
             context = c;
@@ -128,7 +132,8 @@ public class NowPlaying extends NotificationListenerService {
         }
 
         private void update() {
-            String now = null, nowTitle = null;
+            String now = null, nowTitle = null, nowPkg = null;
+            MediaMetadata nowMeta = null;
             for (MediaController mc : controllers) {   // most recent first
                 PlaybackState s = mc.getPlaybackState();
                 int state = s == null ? PlaybackState.STATE_NONE : s.getState();
@@ -139,13 +144,33 @@ public class NowPlaying extends NotificationListenerService {
                     MediaMetadata m = mc.getMetadata();
                     CharSequence t = m == null ? null : m.getDescription().getTitle();
                     nowTitle = now == null ? null : TextUtils.isEmpty(t) ? mc.getPackageName() : t.toString().trim();
+                    nowPkg = mc.getPackageName();
+                    nowMeta = m;
                     break;
                 }
             }
             if (Objects.equals(now, text)) return;
+            if (!Objects.equals(nowTitle, title)) art = art(nowMeta);   // once per title, not per subtitle change
             title = nowTitle;
             text = now;
+            pkg = nowPkg;
             changed.run();
+        }
+
+        /** The title's picture, cropped square and made small (the island shows it at 50 px): null if the app gives none. */
+        private static Bitmap art(MediaMetadata m) {
+            if (m == null) return null;
+            Bitmap b = m.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON);
+            if (b == null) b = m.getBitmap(MediaMetadata.METADATA_KEY_ART);
+            if (b == null) b = m.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART);
+            if (b == null) return null;
+            try {
+                int side = Math.min(b.getWidth(), b.getHeight());
+                Bitmap square = Bitmap.createBitmap(b, (b.getWidth() - side) / 2, (b.getHeight() - side) / 2, side, side);
+                return Bitmap.createScaledBitmap(square, 96, 96, true);
+            } catch (RuntimeException e) {   // a hardware bitmap can't be read
+                return null;
+            }
         }
 
         /** "Title · Artist · App": the parts the app gives, then its name; null when there's none of them. */
