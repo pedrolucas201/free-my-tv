@@ -1169,7 +1169,7 @@ final class Recs {
      */
     private boolean linksOn() {
         String key = watchmodeKey();
-        return !key.isEmpty() && cache.getInt("wm:refused", 0) != key.hashCode() && Prefs.topContent().equals(Prefs.TOP_PICKS);
+        return !key.isEmpty() && cache.getInt("wm:refused", 0) != key.hashCode() && (Prefs.topContent().equals(Prefs.TOP_PICKS) || Prefs.topContent().equals(Prefs.TOP_BOTH));
     }
 
     /** Sets p.link from what was looked up before, or looks it up (2 requests of the free plan's 2,500 a month). */
