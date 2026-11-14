@@ -4436,6 +4436,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         tmp.offset(0, (10 + 14 * f) * k);
         shadowDeep.setColor(Ui.alpha(0xFF000000, tone(0.14f, 0.32f) + tone(0.2f, 0.28f) * f));
         shadows.draw(c, tmp, r0, DEEP_BLUR * k, shadowDeep);
+        if (f > 0.01f) drawGlow(c, bw, bh, r0, f);
         c.restore();
         cell.set(cx - bw * s / 2, cy - bh * s / 2, cx + bw * s / 2, cy + bh * s / 2);
         Bitmap img = watchArt.get(it.pictureUri, it.pictureKey, it.bannerKey, it.pkg);
@@ -4919,6 +4920,28 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         if (HomeData.coinCount() > 0 || playingTab != null) drawQuotes(c);
     }
 
+    // MARK: - Focus halo (from Frame.io's glowing frames): light around the focused card, in the theme's accent
+
+    private final Paint glowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    {
+        glowPaint.setStyle(Paint.Style.STROKE);
+    }
+
+    /**
+     * The halo behind a focused card, in its centred and scaled coordinates (as its shadow): three wide, faint strokes
+     * on its edge, the card covering their inner halves. Measured on a 2 GB MediaTek TV: frame times as without it.
+     * (A lap of light around the rim was tried too: it redraws the whole top on every frame of the lap, p95 +8 ms.)
+     */
+    private void drawGlow(Canvas c, float bw, float bh, float r, float f) {
+        tmp.set(-bw / 2, -bh / 2, bw / 2, bh / 2);
+        float a = (flat != null ? 0.16f : 0.08f) * f;
+        for (int j = 0; j < 3; j++) {
+            glowPaint.setColor(Ui.alpha((flat != null ? flat[F_ACCENT] : 0xFFFFFFFF), a * (3 - j) / 3f));
+            glowPaint.setStrokeWidth((10 + 14 * j) * k);
+            c.drawRoundRect(tmp, r, r, glowPaint);
+        }
+    }
+
     // MARK: - Headline: the focused pick's title, big and light, where "For You" was (with its kind and genre above)
 
     private static final float L_HEAD_BASE = 140, L_EYEBROW_BASE = 62, HEAD_SIZE = 88, HEAD_MIN = 56;
@@ -5038,6 +5061,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
         tmp.offset(0, (10 + 14 * f) * k);
         shadowDeep.setColor(Ui.alpha(0xFF000000, tone(0.14f, 0.32f) + tone(0.2f, 0.28f) * f));
         shadows.draw(c, tmp, r0, DEEP_BLUR * k, shadowDeep);
+        if (f > 0.01f) drawGlow(c, bw, bh, r0, f);
         c.restore();
         Backdrop b = p == null ? null : recs.backdrop(p);
         Bitmap img = b == null ? null : b.wide;
