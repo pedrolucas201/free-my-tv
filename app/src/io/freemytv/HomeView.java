@@ -4367,8 +4367,17 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             roundImage(c, img, watchArt.shader(img), cell, r);
         } else {
             fill.setShader(null);
-            fill.setColor(tone(0xFFDADADF, 0xFF2C2C2E));
+            fill.setColor(flat != null ? flat[F_SURFACE] : tone(0xFFDADADF, 0xFF2C2C2E));
             c.drawRoundRect(cell, r, r, fill);
+        }
+        if (borders()) {   // every card has the theme's border, as the picks' cards (the focus rim draws over it)
+            float inset = 1 * k;
+            tmp.set(cell.left + inset, cell.top + inset, cell.right - inset, cell.bottom - inset);
+            rim.setShader(null);
+            rim.setColor(flat[F_BORDER]);
+            rim.setStrokeWidth(2 * k);
+            c.drawRoundRect(tmp, r - inset, r - inset, rim);
+            rim.setStrokeWidth(2.5f * k);
         }
         float progress = it.progress();
         if (progress >= 0) {
@@ -4377,7 +4386,7 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             fill.setColor(0x73000000);
             tmp.set(cell.left + inset, bottom - bar, cell.right - inset, bottom);
             c.drawRoundRect(tmp, bar / 2, bar / 2, fill);
-            fill.setColor(0xF2FFFFFF);
+            fill.setColor(flat != null ? flat[F_ACCENT] : 0xF2FFFFFF);
             tmp.right = tmp.left + Math.max(bar, tmp.width() * progress);
             c.drawRoundRect(tmp, bar / 2, bar / 2, fill);
         }
@@ -4397,7 +4406,12 @@ final class HomeView extends ViewGroup implements Choreographer.FrameCallback, H
             sheen.setAlpha(alpha);
             c.drawRoundRect(tmp, r0, r0, sheen);
             sheen.setAlpha(255);
-            rim.setShader(watchRim);
+            if (flat != null) {   // a flat theme's accent, solid
+                rim.setShader(null);
+                rim.setColor(flat[F_ACCENT]);
+            } else {
+                rim.setShader(watchRim);
+            }
             rim.setAlpha(alpha);
             rim.setStrokeWidth(2.5f * k / s);
             c.drawRoundRect(tmp, r0, r0, rim);
